@@ -1,0 +1,233 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HirePool AI Assistant - Unified Talent Platform Studio</title>
+  <link rel="stylesheet" href="/demo/demo.css">
+
+  <!-- Embed Standalone HirePool AI Assistant Widget via Single Script Tag -->
+  <script
+    src="/sdk/assistant.js"
+    data-assistant-id="hirepool"
+    data-auto-mount="true"
+    data-theme="auto"
+    defer
+  ></script>
+</head>
+<body>
+
+  <!-- Navigation Bar -->
+  <header class="navbar">
+    <div class="container">
+      <a href="/demo" class="nav-brand">
+        <svg class="brand-logo" width="28" height="28" viewBox="0 0 40 40" fill="#a3e635">
+          <path d="M37.87 14.64v24.11h-7.54V27.51L19.09 38.75l-5.33-5.33 11.24-11.24H13.76V14.64h24.11z"/>
+        </svg>
+        <span>HirePool <span class="brand-sub">AI Assistant</span></span>
+        <span class="nav-brand-badge">SDK v2.0</span>
+      </a>
+      <div class="nav-status">
+        <span id="statusDot" class="status-dot"></span>
+        <span id="statusText">Connecting to HirePool Gateway...</span>
+      </div>
+    </div>
+  </header>
+
+  <!-- Hero Section -->
+  <section class="hero">
+    <div class="container">
+      <h1>HirePool Conversational Assistant</h1>
+      <p>
+        The dedicated conversational AI assistant for the HirePool Talent Platform. Powered by dynamic OpenAPI 3.1 discovery,
+        intent routing, role-scoped workflows for Candidates, Employers, and Consultancies, and seamless session synchronization.
+      </p>
+      <div class="hero-actions">
+        <button id="btnOpen" class="btn btn-primary">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+          </svg>
+          Open HirePool Assistant
+        </button>
+        <button id="btnToggle" class="btn">Toggle Assistant Panel</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Main Content Grid -->
+  <main class="container">
+    <div class="grid-2">
+
+      <!-- Card 1: Role Simulation & Persona Controls -->
+      <section class="card">
+        <h2 class="card-title">HirePool Role Simulation</h2>
+        <p class="card-desc">Simulate user journeys across Candidate, Employer, and Agency roles with dynamic context binding.</p>
+
+        <!-- Role Selector -->
+        <div class="form-group">
+          <label class="form-label" for="roleSelect">Select Active Role Simulation:</label>
+          <select id="roleSelect" class="form-control">
+            <option value="guest" selected>Guest / Platform Visitor (Public Exploration)</option>
+            <option value="candidate">Candidate (Job Matching, Applications & Profile)</option>
+            <option value="employer">Employer / Company (Job Creation, Listings & Hiring)</option>
+            <option value="consultancy">Consultancy / Agency (Bench Management & Submissions)</option>
+          </select>
+        </div>
+
+        <div id="roleDetailsBox" class="role-badge-box">
+          <span class="role-pill guest" id="roleBadge">Visitor Mode</span>
+          <p class="role-desc" id="roleExplanation">Public access. Exploring platform features, career opportunities, pricing, and onboarding guidance.</p>
+        </div>
+
+        <!-- Session & View Controls -->
+        <div class="form-group" style="margin-top: 16px;">
+          <label class="form-label">Assistant Controls:</label>
+          <div class="btn-group">
+            <button id="btnClearConvo" class="btn btn-danger">Reset Conversation</button>
+            <button id="btnClose" class="btn">Close Panel</button>
+          </div>
+        </div>
+
+        <!-- Theme Controls -->
+        <div class="form-group">
+          <label class="form-label">Theme Mode:</label>
+          <div class="btn-group">
+            <button id="btnThemeLight" class="btn">Light</button>
+            <button id="btnThemeDark" class="btn">Dark</button>
+            <button id="btnThemeAuto" class="btn">Auto</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 2: HirePool Workflow Quick Prompts -->
+      <section class="card">
+        <h2 class="card-title">HirePool Intent & Workflow Prompts</h2>
+        <p class="card-desc">Click any prompt to trigger live conversational workflow execution.</p>
+
+        <!-- Dynamic Category Prompts -->
+        <div id="quickPromptsContainer">
+          <div class="prompt-group" data-role="guest">
+            <div class="prompt-group-title">Visitor Inquiries:</div>
+            <div class="btn-group">
+              <button class="btn btn-prompt" data-prompt="How does HirePool help recruitment consultancies?">Consultancy Features</button>
+              <button class="btn btn-prompt" data-prompt="How do I sign up as an employer?">Employer Signup</button>
+              <button class="btn btn-prompt" data-prompt="What kind of tech jobs are available on HirePool?">Available Roles</button>
+            </div>
+          </div>
+
+          <div class="prompt-group" data-role="candidate" style="display: none;">
+            <div class="prompt-group-title">Candidate Workflows:</div>
+            <div class="btn-group">
+              <button class="btn btn-prompt" data-prompt="Show my job recommendations">Job Recommendations</button>
+              <button class="btn btn-prompt" data-prompt="Update my current location to London">Update Location</button>
+              <button class="btn btn-prompt" data-prompt="Check the status of my job applications">My Applications</button>
+            </div>
+          </div>
+
+          <div class="prompt-group" data-role="employer" style="display: none;">
+            <div class="prompt-group-title">Employer & Recruiter Workflows:</div>
+            <div class="btn-group">
+              <button class="btn btn-prompt" data-prompt="Show my company profile and active job postings">Company Profile & Jobs</button>
+              <button class="btn btn-prompt" data-prompt="Create a new job posting for a Senior Backend Engineer">Post a Job</button>
+              <button class="btn btn-prompt" data-prompt="Show my employer hiring dashboard metrics">Hiring Dashboard</button>
+            </div>
+          </div>
+
+          <div class="prompt-group" data-role="consultancy" style="display: none;">
+            <div class="prompt-group-title">Agency / Consultancy Core Operations:</div>
+            <div class="btn-group">
+              <button class="btn btn-prompt" data-prompt="Show my agency candidate bench">Agency Candidate Bench</button>
+              <button class="btn btn-prompt" data-prompt="Add a new candidate to our agency bench">Add Bench Candidate</button>
+              <button class="btn btn-prompt" data-prompt="Submit an agency candidate to open jobs">Submit Candidate</button>
+              <button class="btn btn-prompt" data-prompt="View agency dashboard statistics">Agency Dashboard</button>
+            </div>
+          </div>
+        </div>
+
+        <div class="form-group" style="margin-top: 18px;">
+          <label class="form-label" for="customPromptInput">Send Custom Query:</label>
+          <div style="display: flex; gap: 8px;">
+            <input type="text" id="customPromptInput" class="form-control" placeholder="Type a message to HirePool assistant...">
+            <button id="btnSendCustomPrompt" class="btn btn-accent" style="white-space: nowrap;">Send</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Card 3: Dynamic OpenAPI Discovery Inspector -->
+      <section class="card" style="grid-column: 1 / -1;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div>
+            <h2 class="card-title" style="margin-bottom: 4px;">Dynamic OpenAPI 3.1 Discovery Engine</h2>
+            <p class="card-desc" style="margin-bottom: 0;">Discovers HirePool backend endpoints dynamically from <code>/api/openapi.json</code> without hardcoded static lists.</p>
+          </div>
+          <button id="refreshOpenApiBtn" class="btn" style="padding: 4px 10px; font-size: 0.75rem;">Refresh Spec</button>
+        </div>
+
+        <div class="openapi-inspector-grid">
+          <div class="openapi-metric-box">
+            <span class="metric-label">OpenAPI Version</span>
+            <span class="metric-val" id="openapiVer">3.1.0</span>
+          </div>
+          <div class="openapi-metric-box">
+            <span class="metric-label">Discovered Operations</span>
+            <span class="metric-val" id="openapiOpsCount">Loading...</span>
+          </div>
+          <div class="openapi-metric-box">
+            <span class="metric-label">Active Role Policy</span>
+            <span class="metric-val" id="openapiRolePolicy">Guest Filtered</span>
+          </div>
+          <div class="openapi-metric-box">
+            <span class="metric-label">Confirmation Safeguard</span>
+            <span class="metric-val" style="color: #10b981;">Active (Destructive Ops)</span>
+          </div>
+        </div>
+
+        <div id="openapiOpsList" class="openapi-ops-list">
+          <!-- Dynamically populated -->
+        </div>
+      </section>
+
+      <!-- Card 4: Real-Time SDK Event Stream Log -->
+      <section class="card" style="grid-column: 1 / -1;">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px;">
+          <div>
+            <h2 class="card-title" style="margin-bottom: 4px;">Real-Time SDK Event Stream</h2>
+            <p class="card-desc" style="margin-bottom: 0;">Observes runtime events emitted by <code>AssistantSDK.on(event, handler)</code></p>
+          </div>
+          <button id="clearLogBtn" class="btn" style="padding: 4px 10px; font-size: 0.75rem;">Clear Log</button>
+        </div>
+        <div id="eventLog" class="event-log-container"></div>
+      </section>
+
+      <!-- Card 5: Single Mounting Script Integration Guide -->
+      <section class="card" style="grid-column: 1 / -1;">
+        <h2 class="card-title">HirePool Website Integration Architecture</h2>
+        <p class="card-desc">The entire HirePool assistant UI, orchestration, dynamic API discovery, and authentication sync are packaged inside the SDK. The HirePool website only requires a single mounting script.</p>
+
+        <h3 style="font-size: 1rem; color: #fff; margin-top: 14px;">Next.js / React Mount (Zero Assistant Logic on Website)</h3>
+        <div class="code-box">
+          <button class="code-copy-btn">Copy</button>
+          <pre>&lt;!-- Add once to HirePool layout or root page --&gt;
+&lt;script
+  src="http://localhost:3100/sdk/assistant.js"
+  data-assistant-id="hirepool"
+  data-auto-mount="true"
+  defer
+&gt;&lt;/script&gt;</pre>
+        </div>
+
+        <h3 style="font-size: 1rem; color: #fff; margin-top: 18px;">Automated Session Bridge (Handled Automatically by SDK)</h3>
+        <div class="code-box">
+          <button class="code-copy-btn">Copy</button>
+          <pre>// The SDK automatically monitors hirepool_token, hirepool_user in localStorage/cookies
+// No custom polling or context bridging code is needed on the website!
+window.HirePoolBridge.syncSession();</pre>
+        </div>
+      </section>
+
+    </div>
+  </main>
+
+  <script src="/demo/demo.js"></script>
+</body>
+</html>
