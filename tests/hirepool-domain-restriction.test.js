@@ -216,7 +216,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     aiProviderInvoked = false;
     const outRes = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -233,7 +233,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     aiProviderInvoked = false;
     const jokeRes = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -249,7 +249,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     aiProviderInvoked = false;
     const injectionRes = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -265,7 +265,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     aiProviderInvoked = false;
     const compRes1 = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -281,7 +281,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     aiProviderInvoked = false;
     const compRes2 = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -297,7 +297,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     aiProviderInvoked = false;
     const ambigRes = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -333,7 +333,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     // Turn 1: User asks out-of-scope question
     const turn1Res = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -347,7 +347,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     // Turn 2: User asks another out-of-scope question
     const turn2Res = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -361,7 +361,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
     // Turn 3: User now asks legitimate HirePool in-scope request
     const turn3Res = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -400,7 +400,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
 
     const res = await request(app)
       .post('/api/chat/stream')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',
@@ -436,7 +436,7 @@ test('HirePool Strict Domain Restriction & Context Isolation Suite', async (t) =
 
     const res = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',

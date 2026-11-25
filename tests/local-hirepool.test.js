@@ -148,8 +148,8 @@ test('HirePool public-site policy rejects dashboard origins and unapproved paths
 });
 
 test('HirePool account navigation uses separate existing routes and preserves the opener', () => {
-  assert.equal(getHirePoolLoginUrl('https://hirepool.ai/'), 'https://app.hirepool.ai/login');
-  assert.equal(getHirePoolLoginUrl('https://hirepool.ai/features'), 'https://app.hirepool.ai/login');
+  assert.equal(getHirePoolLoginUrl('https://hirepool.ai/'), 'http://localhost:5173/login');
+  assert.equal(getHirePoolLoginUrl('https://hirepool.ai/features'), 'http://localhost:5173/login');
   assert.equal(
     getHirePoolLoginUrl('http://localhost:3001/features'),
     'http://localhost:5173/login?assistant_origin=http%3A%2F%2Flocalhost%3A3001'
@@ -158,7 +158,7 @@ test('HirePool account navigation uses separate existing routes and preserves th
     getHirePoolAccountUrl('http://127.0.0.1:3000/', 'hirepool_signup'),
     'http://localhost:5173/register?assistant_origin=http%3A%2F%2F127.0.0.1%3A3000'
   );
-  assert.equal(getHirePoolAccountUrl('https://hirepool.ai/', 'hirepool_signup'), 'https://app.hirepool.ai/register');
+  assert.equal(getHirePoolAccountUrl('https://hirepool.ai/', 'hirepool_signup'), 'http://localhost:5173/register');
   assert.throws(() => getHirePoolAccountUrl('http://localhost:3001/', 'unknown'), /Unsupported HirePool account action/);
   assert.throws(
     () => getHirePoolLoginUrl('https://app.hirepool.ai/login'),
@@ -181,7 +181,7 @@ test('HirePool account navigation uses separate existing routes and preserves th
       return fakeWindow;
     }
   });
-  assert.equal(openedUrl, 'https://app.hirepool.ai/login');
+  assert.equal(openedUrl, 'http://localhost:5173/login');
   assert.deepEqual(fakeWindow.opener, {});
   assert.equal(isHirePoolAccountWindow(fakeWindow), true);
   assert.match(result.message, /conversation will remain open/);
@@ -2079,4 +2079,46 @@ test('login continuation binds the guest conversation to a verified user and is 
     .set('Authorization', `Bearer ${bridgeSession.credential}`)
     .send({ continuationReference })
     .expect(410);
+});
+
+test('candidate matching still shows jobs, clearly labelled, when HirePool application history fails', async () => {
+  configureLocalIntegration();
+  registerHirePoolLocalDevelopmentIntegration();
+  const fixture = await readFile(new URL('./fixtures/hirepool-openapi.json', import.meta.url), 'utf8');
+  const session = storeHirePoolSession('candidate-match-history-500', {
+    id: 'candidate-match-history-500-user',
+    userType: 'candidate'
+  });
+  const candidate = authenticateHirePoolLocalCredential(session.credential);
+  const registry = await createRequestActionRegistry(
+    'hirepool',
+    candidate,
+    new ActionRegistry({ actions: [] }),
+    { fetchSpec: async () => fixture }
+  );
+  const matchingAction = registry.list().find(action =>
+    action.metadata.dynamicApi.operationId === 'get_matching_jobs_api_v1_matching_jobs_get'
+  );
+  const result = await executeCandidateMatchingWorkflow(
+    matchingAction,
+    { query: {} },
+    candidate,
+    registry,
+    undefined,
+    async url => {
+      const { pathname } = new URL(url);
+      if (pathname === '/api/v1/matching/jobs') {
+        return [{ id: 'job-1', title: 'Frontend Developer', matching_score: 86, status: 'active', has_screening: false }];
+      }
+      if (pathname === '/api/v1/applications/my-applications') {
+        const error = new Error('HirePool returned HTTP 500');
+        error.statusCode = 500;
+        throw error;
+      }
+      throw new Error(`Unexpected path ${pathname}`);
+    }
+  );
+  assert.equal(result.historyUnavailable, true);
+  assert.deepEqual(result.jobs.map(job => job.id), ['job-1']);
+  assert.ok(result.notes.some(note => /could not check your application history/.test(note)));
 });

@@ -17,6 +17,9 @@ import { authRouter } from './routes/auth.js';
 import { dynamicApiConfirmationRouter } from './routes/dynamic-api-confirmation.js';
 import { createHirePoolResumeRouter } from './routes/hirepool-resume.js';
 import { createHirePoolSignupRouter } from './routes/hirepool-signup.js';
+import { createHirePoolWelcomeRouter } from './routes/hirepool-welcome.js';
+import { stateScopeMiddleware } from './state/state-store.js';
+import { hydrateSharedStateMiddleware } from './state/hydrate-middleware.js';
 import { registerIntegrationDemoActions } from './actions/integration-demo.js';
 import { registerHirePoolActions } from '../../integrations/hirepool/actions.js';
 import { registerHirePoolLocalDevelopmentIntegration } from '../../integrations/hirepool/local-development.js';
@@ -72,6 +75,21 @@ export function createApp() {
     const isDashboardSessionRevokePreflight =
       req.method === 'OPTIONS' &&
       normalizedPath === '/api/hirepool/session/revoke';
+    // The in-app bot reads its personal welcome from the dashboard.
+    const isDashboardAssistantWelcome =
+      (req.method === 'GET' || req.method === 'OPTIONS') &&
+      normalizedPath === '/api/hirepool/assistant/welcome';
+    // ...and loads/saves the profile form (its own route checks the verified session).
+    // (Covers every in-app assistant route: profile form, bench import, job list, submit.
+    // Each route checks the verified HirePool session and role itself.)
+    const isDashboardProfileForm =
+      ['GET', 'POST', 'OPTIONS'].includes(req.method) &&
+      (/^\/api\/hirepool\/assistant\/(?:profile-form|bench-candidates|agency-jobs|bench-submit)$/.test(normalizedPath) ||
+        // "Save as my resume" on the candidate dashboard (the routes require a verified candidate session).
+        /^\/api\/hirepool\/resume\/(?:prepare|confirm|cancel)$/.test(normalizedPath));
+    if (isDashboardAssistantWelcome || isDashboardProfileForm) {
+      return next();
+    }
     if (
       requestPath.startsWith('/api/hirepool/') &&
       HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(req.get('Origin')) &&
@@ -131,6 +149,11 @@ export function createApp() {
     next();
   });
 
+  // Shared state (Redis on Vercel): load what this request needs, save changes
+  // before the response finishes. Both are no-ops without Redis.
+  app.use('/api', stateScopeMiddleware());
+  app.use('/api', hydrateSharedStateMiddleware());
+
   // Mount API endpoints
   app.use('/api/health', healthRouter);
   app.use('/api/config', configRouter);
@@ -145,6 +168,7 @@ export function createApp() {
     app.use('/api/hirepool', hirePoolAuthRouter);
     app.use('/api/hirepool/resume', createHirePoolResumeRouter());
     app.use('/api/hirepool/signup', createHirePoolSignupRouter());
+    app.use('/api/hirepool/assistant', createHirePoolWelcomeRouter());
   }
 
   // OpenAPI spec proxy for dynamic inspection and local tooling

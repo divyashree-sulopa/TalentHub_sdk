@@ -172,8 +172,12 @@ test('HirePool Signup-to-Authentication Transition and Persistence', async (t) =
     };
 
     let authenticatedSession = null;
+    let handoff = null;
     const coordinator = new HirePoolSignupCoordinator({
       apiClient,
+      onHandoff: async (value) => {
+        handoff = value;
+      },
       onAuthenticated: async (session) => {
         authenticatedSession = session;
         // Verify smoke test passes
@@ -240,10 +244,13 @@ test('HirePool Signup-to-Authentication Transition and Persistence', async (t) =
     const completionResult = await coordinator.completeProfile();
     assert.equal(coordinator.state, HIREPOOL_SIGNUP_STATES.COMPLETED);
     assert.equal(completionResult.status, 'success');
-    assert.ok(completionResult.credential);
-    assert.ok(authenticatedSession);
-    assert.equal(authenticatedSession.role, 'consultancy');
-    assert.equal(authenticatedSession.identity.userType, 'consultancy');
+    // Website signup hands off to the HirePool app instead of creating an assistant login.
+    assert.equal(completionResult.credential, undefined);
+    assert.equal(authenticatedSession, null);
+    assert.ok(handoff);
+    assert.equal(handoff.type, 'app');
+    assert.equal(handoff.role, 'consultancy');
+    assert.equal(handoff.url, 'http://localhost:5173/consultancy/dashboard');
 
     // Verify sequential states visited
     assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.ROLE_SELECTION));
@@ -256,9 +263,7 @@ test('HirePool Signup-to-Authentication Transition and Persistence', async (t) =
     assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.PROFILE_COLLECTION));
     assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.PROFILE_REVIEW));
     assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.PROFILE_SUBMITTING));
-    assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.PROFILE_READBACK));
-    assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.AUTH_SESSION_ESTABLISHED));
-    assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.AUTHENTICATION_SMOKE_TEST));
+    assert.ok(!recordedStates.includes(HIREPOOL_SIGNUP_STATES.AUTH_SESSION_ESTABLISHED));
     assert.ok(recordedStates.includes(HIREPOOL_SIGNUP_STATES.COMPLETED));
   });
 
@@ -341,7 +346,7 @@ test('HirePool Signup-to-Authentication Transition and Persistence', async (t) =
     // Execute chat turn as authenticated consultancy partner: "I have candidates currently on the bench"
     const convoId = 'bench-convo-101';
     const chatRes = await request(app).post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${sdkSession.credential}`)
       .send({
         assistantId: 'hirepool',

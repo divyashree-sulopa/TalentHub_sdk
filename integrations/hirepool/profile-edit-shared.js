@@ -232,6 +232,8 @@ export const SKILL_CANONICAL_CASE = Object.freeze({
   html: 'HTML',
   css: 'CSS',
   git: 'Git',
+  github: 'GitHub',
+  gitlab: 'GitLab',
   go: 'Go',
   golang: 'Go',
   java: 'Java',
@@ -303,8 +305,44 @@ export function cleanSkillToken(rawToken) {
   };
 }
 
+/**
+ * True for questions or small talk sent while the bot is waiting for a value,
+ * e.g. "have u updated my skills", "did you save it?", "ok thanks". Such text
+ * must never be saved into a profile field.
+ */
+export function isProfileQuestionOrChatter(text) {
+  const value = normalizeText(text).trim();
+  if (!value) return false;
+  // A real command with values ("can you add Python, Go") is not chatter.
+  if (/\b(?:add|include|put|replace|remove|delete|set)\s+(?!(?:my|the|all|your)?\s*(?:skills?|profile)\b)[a-z0-9.#+]/i.test(value)) {
+    return false;
+  }
+  if (/\?\s*$/.test(value)) return true;
+  if (/^(?:have|has|did|do|does|is|are|was|were|what|why|how|when|where|which|who|can|could|will|would|should|r\s+u|are\s+u|u\s+|you\s+|ok(?:ay)?|thanks|thank\s+you|hi|hello|hey|hmm+|wait)\b/i.test(value)) {
+    return true;
+  }
+  // "my skills are not updated", "you saved my skills" — talk about the profile, not values.
+  return /\b(?:my|your)\s+(?:skills?|profile)\b/i.test(value) &&
+    /\b(?:updated?|upadted|saved?|added|changed|done|working|showing|not)\b/i.test(value);
+}
+
+/**
+ * "python react javascipt" -> ["python", "react", "javascipt"] when every word
+ * is a known skill (or a known misspelling); anything else stays one skill,
+ * so multi-word skills like "Machine Learning" are kept intact.
+ */
+function splitKnownSkillWords(item) {
+  const words = String(item || '').trim().split(/\s+/);
+  if (words.length < 2) return [item];
+  const known = words.every(word => {
+    const lower = word.toLowerCase().replace(/[.,;:!?]+$/, '');
+    return Object.hasOwn(SKILL_CANONICAL_CASE, lower) || Object.hasOwn(SKILL_TYPO_MAP, lower);
+  });
+  return known ? words : [item];
+}
+
 export function normalizeSkillsArray(rawList) {
-  const items = Array.isArray(rawList) ? rawList : [];
+  const items = (Array.isArray(rawList) ? rawList : []).flatMap(splitKnownSkillWords);
   const deduped = [];
   const seen = new Set();
   const corrections = [];
@@ -353,6 +391,11 @@ export function parseSkillsInput(rawMessage, existingSkills = [], currentOperati
     return { kind: 'instruction', operation: currentOperation || 'add', skills: [], corrections: [] };
   }
 
+  // Questions and chatter ("have u updated my skills", "ok thanks") are never skills.
+  if (isProfileQuestionOrChatter(raw)) {
+    return { kind: 'instruction', question: true, operation: currentOperation || 'add', skills: [], corrections: [] };
+  }
+
   // Check clear/remove-all phrasing
   if (/^(?:please\s+)?(?:clear|remove|delete)\s+all\s+(?:my\s+|the\s+)?skills?\s*[.!?]*$/i.test(text)) {
     return { kind: 'clear', operation: 'replace', skills: [], corrections: [] };
@@ -360,7 +403,11 @@ export function parseSkillsInput(rawMessage, existingSkills = [], currentOperati
 
   // Detect explicit operation prefix with values
   let explicitOp = null;
-  let working = raw;
+  // Polite lead-ins before a command ("can you add …", "I'd like to remove …").
+  let working = raw.replace(
+    /^(?:(?:please|kindly|can\s+you|could\s+you|would\s+you|i\s+(?:want|would\s+like|need)\s+to|i'?d\s+like\s+to|let'?s)\s+)+(?=(?:also\s+)?(?:add|remove|delete|drop|replace|overwrite|set|update|edit|change|modify)\b)/i,
+    ''
+  );
 
   const prefixRules = [
     {

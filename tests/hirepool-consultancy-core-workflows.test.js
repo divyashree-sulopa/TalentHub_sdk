@@ -12,6 +12,8 @@ import http from 'node:http';
 import { EventEmitter } from 'node:events';
 import request from 'supertest';
 import { createApp } from '../backend/src/app.js';
+import { setAIProvider } from '../backend/src/providers/factory.js';
+import { sessionManager } from '../backend/src/session-manager.js';
 import openapiFixture from './fixtures/hirepool-openapi.json' with { type: 'json' };
 import {
   storeHirePoolSession
@@ -124,13 +126,15 @@ test('Consultancy 2: Candidate Bench multi-turn collection prompts only for miss
   assert.match(turn2.text, /John Doe/);
   assert.match(turn2.text, /Full Stack Engineer/);
   assert.match(turn2.text, /Mumbai, India/);
-  assert.match(turn2.text, /4 years/);
+  // The full details are in the review card; the message itself stays short (no duplicate list).
+  assert.doesNotMatch(turn2.text, /\*\*Email:\*\*/);
   assert.equal(session.consultancyCandidateDraft.stage, 'awaiting_confirmation');
   assert.ok(stagedBody);
   assert.equal(stagedBody.first_name, 'John');
   assert.equal(stagedBody.last_name, 'Doe');
   assert.equal(stagedBody.email, 'john.doe@example.com');
   assert.equal(stagedBody.job_title, 'Full Stack Engineer');
+  assert.equal(stagedBody.years_of_experience, 4);
 });
 
 test('Consultancy 3: Candidate Bench addition can be cleanly cancelled without mutating state', async () => {
@@ -783,4 +787,190 @@ test('Consultancy 12: Regression - "Add a new candidate", comma-separated detail
   assert.equal(turn3.handled, true);
   assert.match(turn3.text, /Confirm & Execute/i);
   assert.ok(turn3.hostAction);
+});
+
+test('Consultancy 13: Replay of a real agency chat — one-line details, no command words as names, edits apply', async () => {
+  const session = { id: 'conv-bench-replay' };
+  const authUser = { role: 'consultancy', email: 'agency@bhav.test' };
+  const staged = [];
+  const cancelled = [];
+  const stageMock = async ({ body }) => {
+    staged.push(body);
+    const token = `token-${staged.length}`;
+    return { hostAction: { id: token, action: 'add_candidate', confirmationToken: token, parameters: { body } } };
+  };
+  const cancelMock = async token => { cancelled.push(token); };
+  const turn = message => handleHirePoolAgencyCandidateAddTurn({
+    message,
+    session,
+    authUser,
+    stageCandidateAddConfirmation: stageMock,
+    cancelConfirmation: cancelMock
+  });
+
+  await turn('Add a candidate');
+  // Previously: the whole line became the last name and HirePool rejected it.
+  const oneLine = await turn('divya shree divyashreem@gmail.com software engineer bengaluru 1 year javascript, react, html, css, git,github, node');
+  assert.match(oneLine.text, /Review Candidate Bench Details/);
+  assert.doesNotMatch(oneLine.text, /parameters are invalid/i);
+  assert.equal(staged[0].first_name, 'Divya');
+  assert.equal(staged[0].last_name, 'Shree');
+  assert.equal(staged[0].job_title, 'software engineer');
+  assert.equal(staged[0].current_location, 'Bengaluru');
+  assert.equal(staged[0].years_of_experience, 1);
+  assert.deepEqual(staged[0].skills, ['javascript', 'react', 'html', 'css', 'git', 'github', 'node']);
+
+  // "Edit details" sends the corrected values; they replace the old ones and the old card is retired.
+  const edited = await turn('Name: Divya Shree M, Email: divyashreem@gmail.com, Job title: Frontend Developer, Location: Bengaluru, Experience: 2 years, Skills: React, Node.js');
+  assert.match(edited.text, /Divya Shree M/);
+  assert.match(edited.text, /Frontend Developer/);
+  assert.equal(staged[1].job_title, 'Frontend Developer');
+  assert.equal(staged[1].years_of_experience, 2);
+  assert.deepEqual(cancelled, ['token-1']);
+});
+
+test('Consultancy 14: "add candidate" is never taken as a candidate name', async () => {
+  const session = { id: 'conv-bench-name' };
+  const authUser = { role: 'consultancy' };
+  await handleHirePoolAgencyCandidateAddTurn({ message: 'Add a candidate', session, authUser });
+  const reply = await handleHirePoolAgencyCandidateAddTurn({ message: 'add candidate', session, authUser });
+  assert.doesNotMatch(reply.text, /Candidate Name:\*\*\s*add candidate/i);
+  assert.equal(session.consultancyCandidateDraft.fields.first_name, undefined);
+});
+
+test('Consultancy 15: a rejected staging keeps the draft and explains in plain words', async () => {
+  const session = { id: 'conv-bench-reject' };
+  const authUser = { role: 'consultancy' };
+  const reply = await handleHirePoolAgencyCandidateAddTurn({
+    message: 'Rahul Verma rahul@example.com data analyst pune 3 years python, sql, excel',
+    session,
+    authUser,
+    stageCandidateAddConfirmation: async () => { throw new Error('Dynamic API action parameters are invalid'); }
+  });
+  assert.doesNotMatch(reply.text, /Dynamic API|parameters are invalid/i);
+  assert.match(reply.text, /couldn't accept these candidate details/);
+  assert.equal(session.consultancyCandidateDraft.fields.email, 'rahul@example.com');
+});
+
+test('Consultancy 16: "job opportunities" lists all open jobs like the dashboard, not a search for those words', async () => {
+  const { isGenericJobListRequest, normalizeHirePoolJobSearchArguments } = await import('../backend/src/routes/chat.js');
+  for (const m of ['job oppurtunities', 'Job opportunities', 'show open jobs', 'any openings?', 'available jobs for my candidates']) {
+    assert.equal(isGenericJobListRequest(m), true, m);
+  }
+  for (const m of ['find React developer jobs', 'apply to job 2', 'submit candidate to job']) {
+    assert.equal(isGenericJobListRequest(m), false, m);
+  }
+  // HirePool matches the keyword inside titles, so generic words must not be sent.
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'job opportunities', page: 1 } }), { query: { page: 1 } });
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'React developer jobs' } }), { query: { query: 'React developer' } });
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'open positions in Pune' } }), { query: { locations: 'Pune' } });
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ path: { id: 1 } }), { path: { id: 1 } });
+});
+
+test('Consultancy: follow-up answers while adding a candidate are details, not off-topic', async () => {
+  const { classifyHirePoolMessage, HIREPOOL_DOMAIN_CATEGORIES } = await import('../integrations/hirepool/domain-policy.js');
+  const staged = [];
+  const stage = async ({ body }) => {
+    staged.push(body);
+    return { hostAction: { id: `t${staged.length}`, confirmationToken: `t${staged.length}`, parameters: { body } } };
+  };
+  const run = async replies => {
+    const session = { id: `conv-followup-${Math.random()}` };
+    const authUser = { role: 'consultancy' };
+    let result;
+    for (const message of replies) {
+      // The off-topic check must let every reply through while the draft is open.
+      if (session.consultancyCandidateDraft?.active) {
+        const verdict = classifyHirePoolMessage(message, session, { authUser });
+        assert.notEqual(verdict.category, HIREPOOL_DOMAIN_CATEGORIES.OUT_OF_SCOPE, message);
+      }
+      result = await handleHirePoolAgencyCandidateAddTurn({ message, session, authUser, stageCandidateAddConfirmation: stage });
+    }
+    return result;
+  };
+
+  const unlabelled = await run(['Add a candidate', 'boomi boomi@gmail.com softwae engineer', 'naidu bengaluru, india']);
+  assert.match(unlabelled.text, /Review Candidate Bench Details/);
+  assert.equal(staged.at(-1).first_name, 'Boomi');
+  assert.equal(staged.at(-1).last_name, 'Naidu');
+  assert.equal(staged.at(-1).current_location, 'Bengaluru, India');
+
+  const labelled = await run(['Add a candidate', 'boomi boomi@gmail.com softwae engineer', 'Last name - naidu Location (city, country) -bengaluru, india']);
+  assert.match(labelled.text, /Review Candidate Bench Details/);
+  assert.equal(staged.at(-1).first_name, 'Boomi');
+  assert.equal(staged.at(-1).last_name, 'Naidu');
+  assert.match(staged.at(-1).current_location, /bengaluru, india/i);
+  assert.deepEqual(staged.at(-1).skills || [], [], 'no made-up skills from the labels');
+});
+
+test('Consultancy: updating a bench candidate never touches the agency user\'s own profile', async () => {
+  const { handleAgencyCandidateEditTurn, isAgencyCandidateEditIntent } = await import('../integrations/hirepool/agency-candidate-edit.js');
+  const authUser = { role: 'consultancy' };
+  const staged = [];
+  const bench = [
+    { id: 'c-1', first_name: 'Boomi', last_name: 'Naidu', email: 'boominaidu@gmail.com' },
+    { id: 'c-2', first_name: 'Ravi', last_name: 'Kumar', email: 'ravi@x.com' }
+  ];
+  const findCandidates = async query => bench.filter(c =>
+    `${c.first_name} ${c.last_name} ${c.email}`.toLowerCase().includes(String(query).toLowerCase()));
+  const stageCandidateUpdate = async input => {
+    staged.push(input);
+    return { hostAction: { id: `u${staged.length}`, confirmationToken: `u${staged.length}` } };
+  };
+  const turn = (session, message) => handleAgencyCandidateEditTurn({ message, session, findCandidates, stageCandidateUpdate });
+
+  // Right after adding Boomi: "this candidate" means Boomi, and the bot asks for the number.
+  const session = { consultancyLastCandidate: { id: 'c-1', name: 'Boomi Naidu', email: 'boominaidu@gmail.com' } };
+  assert.equal(isAgencyCandidateEditIntent('add phone number to this candidate', session, authUser), true);
+  const ask = await turn(session, 'add phone number to this candidate');
+  assert.match(ask.text, /Boomi Naidu.*phone number/);
+  assert.equal(isAgencyCandidateEditIntent('4562897634', session, authUser), true, 'the reply continues the edit');
+  const done = await turn(session, '4562897634');
+  assert.match(done.text, /Boomi Naidu.*4562897634/);
+  assert.deepEqual(staged.at(-1), { candidateId: 'c-1', body: { phone: '4562897634' }, name: 'Boomi Naidu', label: 'phone number' });
+
+  // By name in one message, looked up on the bench.
+  const fresh = {};
+  assert.equal(isAgencyCandidateEditIntent('update Ravi Kumar phone number 9876543210', fresh, authUser), true);
+  const byName = await turn(fresh, 'update Ravi Kumar phone number 9876543210');
+  assert.ok(byName.hostAction);
+  assert.equal(staged.at(-1).candidateId, 'c-2');
+
+  // Bad numbers are explained; own-profile requests are left alone.
+  const bad = await turn({ consultancyLastCandidate: session.consultancyLastCandidate }, 'update this candidate phone to 12345');
+  assert.match(bad.text, /exactly 10 digits/);
+  assert.equal(isAgencyCandidateEditIntent('update my phone to 9876543210', {}, authUser), false);
+  assert.equal(isAgencyCandidateEditIntent('update my phone to 9876543210', session, authUser), false);
+  assert.equal(isAgencyCandidateEditIntent('add phone number to this candidate', session, { role: 'candidate' }), false);
+
+  const missing = await turn({}, 'update Priya Shah phone number 9876543210');
+  assert.match(missing.text, /couldn't find \*\*Priya Shah\*\*/);
+});
+
+test('Consultancy chat: "add phone number to this candidate" goes to the candidate, not the agency user', async () => {
+  process.env.NODE_ENV = 'development';
+  setAIProvider({
+    name: 'agency-edit-provider',
+    async checkHealth() { return { available: true, model: 'test' }; },
+    async chat() { return { text: 'Hello from HirePool.', model: 'test', finishReason: 'stop' }; },
+    async chatStream(input) { input.onChunk?.('Hello from HirePool.'); return { text: 'Hello from HirePool.', model: 'test' }; }
+  });
+  const sdkSession = setupConsultancySession();
+  const send = (message, conversationId) => request(app)
+    .post('/api/chat')
+    .set('Origin', HIREPOOL_LOCAL_EXTENSION_ORIGIN)
+    .set('Authorization', `Bearer ${sdkSession.credential}`)
+    .send({ assistantId: 'hirepool', message, ...(conversationId ? { conversationId } : {}) });
+
+  const first = await send('hi');
+  const conversationId = first.body.conversationId;
+  assert.ok(conversationId);
+  // Boomi was just added from this chat.
+  const stored = [...sessionManager.sessions.values()].find(s => s.id === conversationId);
+  assert.ok(stored, 'chat session exists');
+  stored.consultancyLastCandidate = { id: 'cand-1', name: 'Boomi Naidu', email: 'boominaidu@gmail.com' };
+
+  const res = await send('add phone number to this candidate', conversationId).expect(200);
+  assert.match(res.body.text, /Boomi Naidu.*new phone number/);
+  assert.doesNotMatch(res.body.text, /Personal Account Profile|your 10-digit phone/i);
 });

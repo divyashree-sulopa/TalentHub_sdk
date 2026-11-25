@@ -152,6 +152,12 @@ export function extractHirePoolRegistrationRole(message) {
     return 'consultancy';
   }
 
+  // Website role cards and common phrasing from job seekers.
+  if (/^\s*(?:i'?m|i\s+am)\s+looking\s+for\s+(?:a\s+)?(?:new\s+)?(?:job|work|role)\b/i.test(text) ||
+      /^\s*(?:find|finding)\s+(?:me\s+)?(?:a\s+)?job\b/i.test(text)) {
+    return 'candidate';
+  }
+
   return null;
 }
 
@@ -348,10 +354,10 @@ export function getHirePoolVisitorSystemContext(session, options = {}) {
     `- Signup step: ${effectiveSignupState}`,
     `- Active context: ${visitor?.activeContext || 'general_overview'}`,
     'GUIDANCE:',
-    '- Be helpful, concise, and conversational for guest visitors asking about HirePool capabilities, job discovery, pricing, privacy policy, terms of service, hiring workflows, or registration.',
-    '- When a visitor asks general informational, pricing, privacy, or legal questions ("How does HirePool work?", "Do you support freshers?", "Can I search for remote jobs?", "Explain pricing", "Privacy policy", "Terms of Service"), answer in clear text using verified HirePool facts WITHOUT attaching signup or login action cards and WITHOUT refusing them as out of scope.',
+    '- Be helpful, concise, and conversational for guest visitors asking about HirePool capabilities, job discovery, privacy policy, terms of service, hiring workflows, or registration. For pricing, follow the PRICING POLICY.',
+    '- When a visitor asks general informational, privacy, or legal questions ("How does HirePool work?", "Do you support freshers?", "Can I search for remote jobs?", "Privacy policy", "Terms of Service"), answer in clear text using verified HirePool facts WITHOUT attaching signup or login action cards and WITHOUT refusing them as out of scope.',
     '- Do NOT assume an unverified visitor role without user confirmation. If a visitor mentions having a list of candidates, clarify whether they are hiring as an Employer/Company or managing a talent pool as a Recruitment Consultancy/Staffing Agency, rather than arbitrarily assigning a role.',
-    '- When a visitor shares their career background (e.g. "I have 2 years of experience and I\'m actively looking"), recognize it as career/job exploration and explain how HirePool supports experienced candidates with AI job matching, work modes, and free registration.',
+    '- When a visitor shares their career background (e.g. "I have 2 years of experience and I\'m actively looking"), recognize it as career/job exploration and explain how HirePool supports experienced candidates with AI job matching, work modes, and easy registration.',
     '- Answer greetings ("Hi", "Hello") with a friendly, concise welcome and helpful next steps.',
     '- When asked to compare HirePool with external platforms (e.g. Naukri, LinkedIn), answer factually using verified HirePool capabilities without claiming external platform ratings or refusing the question.',
     '- When a visitor expresses recruiting or hiring intent (e.g. "I\'m here for recruiting", "I need to hire", "I have a job requirement"), explain verified HirePool hiring workflows (job creation, AI candidate matching, applicant review, automated screening) without inventing commercial terms, free trials, or pricing. Clarify whether they are an Employer hiring for their company or a Recruitment Consultancy placing candidates for client companies.',

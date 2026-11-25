@@ -1390,7 +1390,41 @@ test('Widget API 32: AssistantApiClient.cancelDynamicApiAction calls POST /api/d
   }
 
   const sdkSource = await readFile(new URL('../widget/src/sdk.js', import.meta.url), 'utf8');
-  assert.match(sdkSource, /events\.on\('action:cancel'/);
+  assert.match(sdkSource, /events\.on\(\s*["']action:cancel["']/);
   assert.match(sdkSource, /cancelDynamicApiAction/);
   assert.match(sdkSource, /integrationCancelUnsubscribe\?\.\(\)/);
+});
+
+test('Replay of a real dashboard chat: "github" in a skills list stays a skill, and questions are never saved', async () => {
+  const backend = await startMockHirePoolBackend({ candidateProfile: { id: 'c-replay', first_name: 'Divya', last_name: 'Shree', skills: [] } });
+  setDeterministicProvider('cand-replay-skills');
+  const app = createApp();
+  const session = createRoleSession({ token: 'tok-cand-replay', id: 'cand-replay', email: 'replay@test.dev', role: 'candidate' });
+
+  const start = await sendChat(app, session.credential, 'Update my skills');
+  assert.match(start.text, /skill/i);
+
+  // Previously this jumped to "What value would you like to set for github url?" and dropped the skills.
+  const list = await sendChat(app, session.credential, 'python, javascript, react, git, github', start.conversationId);
+  assert.doesNotMatch(list.text, /github url/i);
+  assert.ok(list.action?.confirmationToken, 'skills should be staged for confirmation');
+  assert.deepEqual(list.action.parameters.body.skills, ['Python', 'JavaScript', 'React', 'Git', 'GitHub']);
+  await confirmAction(app, session.credential, list.action.confirmationToken);
+  assert.deepEqual(backend.state.candidateProfile.skills, ['Python', 'JavaScript', 'React', 'Git', 'GitHub']);
+
+  // A question is answered, not saved as a skill.
+  const again = await sendChat(app, session.credential, 'Update my skills', start.conversationId);
+  assert.match(again.text, /skill/i);
+  const question = await sendChat(app, session.credential, 'have u upadted my skills', start.conversationId);
+  assert.equal(question.action, undefined);
+  assert.match(question.text, /Python, JavaScript, React, Git, GitHub/);
+  assert.deepEqual(backend.state.candidateProfile.skills, ['Python', 'JavaScript', 'React', 'Git', 'GitHub']);
+
+  // Space-separated known skills and a typo are split and corrected.
+  const spaced = await sendChat(app, session.credential, 'add html css typescipt', start.conversationId);
+  assert.ok(spaced.action?.confirmationToken);
+  assert.deepEqual(
+    spaced.action.parameters.body.skills.slice(-3),
+    ['HTML', 'CSS', 'TypeScript']
+  );
 });

@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import rateLimit from 'express-rate-limit';
 import { SERVER_DEFAULTS } from '../../../config/defaults.js';
 import { HIREPOOL_LOCAL_EXTENSION_ORIGIN } from '../../../extension/hirepool/site-policy.js';
+import { getStateStore, stateDigest } from '../state/state-store.js';
 
 /**
  * The SDK API is public to browser origins. CORS permits cross-origin transport;
@@ -109,6 +110,35 @@ export function configureHelmet() {
 /**
  * Configure Rate Limiter
  */
+/**
+ * express-rate-limit store backed by the shared state store (Redis).
+ * Client keys (IP addresses) are stored only as SHA-256 digests.
+ */
+export class SharedStateRateLimitStore {
+  constructor(windowMs) {
+    this.windowMs = windowMs;
+    this.localKeys = false;
+    this.prefix = 'rate-limit';
+  }
+
+  init(options) {
+    if (options?.windowMs) this.windowMs = options.windowMs;
+  }
+
+  async increment(key) {
+    const { count, resetAt } = await getStateStore().increment(this.prefix, stateDigest(key), this.windowMs);
+    return { totalHits: count, resetTime: new Date(resetAt) };
+  }
+
+  async decrement(key) {
+    await getStateStore().decrement(this.prefix, stateDigest(key));
+  }
+
+  async resetKey(key) {
+    await getStateStore().resetKey(this.prefix, stateDigest(key));
+  }
+}
+
 export function configureRateLimiter() {
   const windowMs =
     parseInt(process.env.RATE_LIMIT_WINDOW_MS, 10) ||
@@ -118,9 +148,13 @@ export function configureRateLimiter() {
     parseInt(process.env.RATE_LIMIT_MAX_REQUESTS, 10) ||
     SERVER_DEFAULTS.RATE_LIMIT.MAX_REQUESTS;
 
+  const sharedStore = getStateStore().shared ? new SharedStateRateLimitStore(windowMs) : undefined;
+
   return rateLimit({
     windowMs,
     max,
+    // With Redis the limit is counted across all server instances.
+    ...(sharedStore ? { store: sharedStore, passOnStoreError: true } : {}),
 
     standardHeaders: true,
 

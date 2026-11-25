@@ -71,7 +71,6 @@ var AssistantSDKBundle = (() => {
 
   // config/hirepool-site-policy.js
   var HIREPOOL_PUBLIC_SITE_ORIGIN = "https://hirepool.ai";
-  var HIREPOOL_PRODUCTION_LOGIN_URL = "https://app.hirepool.ai/login";
   var HIREPOOL_LOCAL_LOGIN_URL = "http://localhost:5173/login";
   var HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS = Object.freeze([
     "http://localhost:3000",
@@ -94,6 +93,16 @@ var AssistantSDKBundle = (() => {
     "http://localhost:5173",
     "http://127.0.0.1:5173"
   ]);
+  var HIREPOOL_APP_ORIGIN = "https://app.hirepool.ai";
+  var appOrigins = /* @__PURE__ */ new Set([HIREPOOL_APP_ORIGIN, ...HIREPOOL_LOCAL_DASHBOARD_ORIGINS]);
+  function isHirePoolAppUrl(value) {
+    try {
+      const url = new URL(value);
+      return appOrigins.has(url.origin) && !url.username && !url.password;
+    } catch {
+      return false;
+    }
+  }
   var localOrigins = new Set(HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS);
   var publicOrigins = /* @__PURE__ */ new Set([...HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS, HIREPOOL_PUBLIC_SITE_ORIGIN]);
   var publicPaths = new Set(HIREPOOL_LOCAL_PUBLIC_SITE_PATHS);
@@ -137,7 +146,7 @@ var AssistantSDKBundle = (() => {
     }
     const route = isSignup ? "/register" : "/login";
     if (pageUrl.origin === HIREPOOL_PUBLIC_SITE_ORIGIN) {
-      return new URL(route, HIREPOOL_PRODUCTION_LOGIN_URL).href;
+      return new URL(route, HIREPOOL_LOCAL_LOGIN_URL).href;
     }
     const accountUrl = new URL(route, HIREPOOL_LOCAL_LOGIN_URL);
     accountUrl.searchParams.set("assistant_origin", pageUrl.origin);
@@ -618,6 +627,336 @@ var AssistantSDKBundle = (() => {
       this.lastVerifiedIdentity = null;
     }
   };
+
+  // widget/src/auto-open.js
+  var SESSION_KEY = "hirepool-assistant:auto-open:shown";
+  var SNOOZE_KEY = "hirepool-assistant:auto-open:snoozed-until";
+  var MOBILE_QUERY = "(max-width: 640px)";
+  var TYPING_RECHECK_MS = 2e3;
+  function safeGet(storage, key) {
+    try {
+      return storage?.getItem(key) ?? null;
+    } catch {
+      return null;
+    }
+  }
+  function safeSet(storage, key, value) {
+    try {
+      storage?.setItem(key, value);
+    } catch {
+    }
+  }
+  function normalizePath(path) {
+    const value = String(path || "/");
+    return value.length > 1 ? value.replace(/\/+$/, "") : value;
+  }
+  function shouldAutoOpen(config, env) {
+    if (!config || config.enabled !== true) return false;
+    if (env.hasConversation) return false;
+    const path = normalizePath(env.pathname);
+    const excluded = Array.isArray(config.excludedPaths) ? config.excludedPaths.map(normalizePath) : [];
+    if (excluded.includes(path)) return false;
+    if (safeGet(env.sessionStorage, SESSION_KEY) === "1") return false;
+    const snoozedUntil = Number(safeGet(env.localStorage, SNOOZE_KEY) || 0);
+    if (Number.isFinite(snoozedUntil) && snoozedUntil > env.now) return false;
+    return true;
+  }
+  function isTypingInPage(doc) {
+    const el = doc?.activeElement;
+    if (!el || el === doc.body) return false;
+    if (el.id === "ai-assistant-plugin-root") return false;
+    const tag = String(el.tagName || "").toLowerCase();
+    return tag === "input" || tag === "textarea" || tag === "select" || el.isContentEditable === true;
+  }
+  var AutoOpenController = class {
+    /**
+     * @param {object} options
+     * @param {object} options.config behavior.autoOpen
+     * @param {() => void} options.openPanel opens the chat without moving focus
+     * @param {(text: string) => void} options.showTeaser shows the phone greeting bubble
+     * @param {() => boolean} options.isOpen
+     * @param {() => boolean} options.hasConversation
+     * @param {Window} [options.win]
+     */
+    constructor({ config, openPanel, showTeaser, isOpen, hasConversation, win = globalThis.window }) {
+      this.config = config || {};
+      this.openPanel = openPanel;
+      this.showTeaser = showTeaser;
+      this.isOpen = isOpen;
+      this.hasConversation = hasConversation;
+      this.win = win;
+      this.doc = win?.document;
+      this.remainingMs = Math.max(1e3, Number(this.config.delayMs) || 5e3);
+      this.timer = null;
+      this.startedAt = 0;
+      this.fired = false;
+      this.stopped = false;
+      this._onVisibility = () => this._handleVisibility();
+    }
+    start() {
+      if (!this.win || !this.doc) return false;
+      const allowed = shouldAutoOpen(this.config, {
+        pathname: this.win.location?.pathname,
+        now: Date.now(),
+        sessionStorage: this.win.sessionStorage,
+        localStorage: this.win.localStorage,
+        hasConversation: this.hasConversation?.()
+      });
+      if (!allowed) return false;
+      this.doc.addEventListener("visibilitychange", this._onVisibility);
+      if (this.doc.visibilityState !== "hidden") this._schedule();
+      return true;
+    }
+    stop() {
+      this.stopped = true;
+      clearTimeout(this.timer);
+      this.timer = null;
+      this.doc?.removeEventListener("visibilitychange", this._onVisibility);
+    }
+    /** The visitor closed the auto-opened chat or the bubble: stay quiet for a while. */
+    snooze() {
+      const hours = Number.isFinite(this.config.snoozeHours) ? this.config.snoozeHours : 24;
+      if (hours > 0) {
+        safeSet(this.win?.localStorage, SNOOZE_KEY, String(Date.now() + hours * 60 * 60 * 1e3));
+      }
+    }
+    _schedule() {
+      if (this.stopped || this.fired) return;
+      clearTimeout(this.timer);
+      this.startedAt = Date.now();
+      this.timer = setTimeout(() => this._fire(), this.remainingMs);
+    }
+    _handleVisibility() {
+      if (this.stopped || this.fired) return;
+      if (this.doc.visibilityState === "hidden") {
+        clearTimeout(this.timer);
+        this.timer = null;
+        this.remainingMs = Math.max(0, this.remainingMs - (Date.now() - this.startedAt));
+      } else {
+        this._schedule();
+      }
+    }
+    _fire() {
+      if (this.stopped || this.fired) return;
+      if (this.isOpen?.() || this.hasConversation?.()) {
+        this.stop();
+        return;
+      }
+      if (isTypingInPage(this.doc)) {
+        this.timer = setTimeout(() => this._fire(), TYPING_RECHECK_MS);
+        return;
+      }
+      this.fired = true;
+      safeSet(this.win.sessionStorage, SESSION_KEY, "1");
+      this.doc.removeEventListener("visibilitychange", this._onVisibility);
+      const isPhone = typeof this.win.matchMedia === "function" && this.win.matchMedia(MOBILE_QUERY).matches;
+      const mobileMode = this.config.mobile || "bubble";
+      if (isPhone) {
+        if (mobileMode === "bubble") this.showTeaser?.(this.config.teaser || "Hi! \u{1F44B} Need help getting started?");
+        else if (mobileMode === "panel") this.openPanel?.();
+        return;
+      }
+      this.openPanel?.();
+    }
+  };
+
+  // widget/src/idle-nudge.js
+  var IdleNudgeController = class {
+    /**
+     * @param {object} options
+     * @param {number} [options.delayMs=5000]
+     * @param {number} [options.maxConsecutive=2]
+     * @param {(stage: string, index: number) => ({ text: string, quickReplies?: string[] }|null)} options.pickNudge
+     * @param {(nudge: { text: string, quickReplies?: string[] }) => void} options.post
+     * @param {() => boolean} options.canNudge true when it is a good moment right now
+     * @param {() => boolean} [options.isPaused] true while it should wait (e.g. tab hidden)
+     */
+    constructor({ delayMs = 5e3, maxConsecutive = 2, pickNudge, post, canNudge, isPaused = () => false }) {
+      this.delayMs = Math.max(1e3, Number(delayMs) || 5e3);
+      this.maxConsecutive = Math.max(0, Number(maxConsecutive) || 0);
+      this.pickNudge = pickNudge;
+      this.post = post;
+      this.canNudge = canNudge;
+      this.isPaused = isPaused;
+      this.timer = null;
+      this.stage = null;
+      this.consecutive = 0;
+      this.stopped = false;
+    }
+    /** The assistant just spoke (welcome, answer, or a follow-up). */
+    onAssistantMessage(stage) {
+      if (this.stopped) return;
+      this.stage = stage;
+      this._schedule();
+    }
+    /** The visitor typed or interacted: wait for them instead of nudging. */
+    onUserActivity() {
+      clearTimeout(this.timer);
+      this.timer = null;
+    }
+    /** The visitor sent a message: the follow-up allowance starts over. */
+    onUserMessage() {
+      this.consecutive = 0;
+      this.onUserActivity();
+    }
+    stop() {
+      this.stopped = true;
+      this.onUserActivity();
+    }
+    _schedule() {
+      clearTimeout(this.timer);
+      if (this.stopped || this.consecutive >= this.maxConsecutive) {
+        this.timer = null;
+        return;
+      }
+      this.timer = setTimeout(() => this._fire(), this.delayMs);
+    }
+    _fire() {
+      this.timer = null;
+      if (this.stopped || this.consecutive >= this.maxConsecutive) return;
+      if (this.isPaused()) {
+        this._schedule();
+        return;
+      }
+      if (!this.canNudge()) return;
+      const nudge = this.pickNudge(this.stage, this.consecutive);
+      if (!nudge?.text) return;
+      this.consecutive += 1;
+      this.post(nudge);
+      this._schedule();
+    }
+  };
+  function pickIdleNudge(config, stage, used, role = null) {
+    if (role && config?.byRole?.[role]) {
+      config = config.byRole[role];
+    }
+    const pool = (stage === "welcome" ? config?.afterWelcome : stage === "question" ? config?.afterQuestion || config?.afterAnswer : config?.afterAnswer) || [];
+    for (const item of pool) {
+      const text = typeof item === "string" ? item : item?.text;
+      if (text && !used.has(text)) {
+        used.add(text);
+        return {
+          text,
+          quickReplies: Array.isArray(item?.quickReplies) ? item.quickReplies.slice(0, 5) : []
+        };
+      }
+    }
+    return null;
+  }
+
+  // widget/src/error-messages.js
+  var AUTH_CODES = /* @__PURE__ */ new Set([
+    "INVALID_CREDENTIALS",
+    "MISSING_CREDENTIALS",
+    "TOKEN_EXPIRED",
+    "EXPIRED_SESSION",
+    "AUTH_REQUIRED",
+    "UNAUTHORIZED",
+    "INVALID_HOST_CREDENTIAL"
+  ]);
+  var UPSTREAM_CODES = /* @__PURE__ */ new Set([
+    "STATE_UNAVAILABLE",
+    "HIREPOOL_API_TIMEOUT",
+    "REQUEST_TIMEOUT",
+    "PROVIDER_NOT_CONFIGURED",
+    "UPSTREAM_UNAVAILABLE",
+    "IDENTITY_UNAVAILABLE"
+  ]);
+  function isNetworkError(error, online) {
+    if (online === false) return true;
+    const message = String(error?.message || "");
+    return error?.name === "TypeError" && /fetch|network|load failed|connection/i.test(message);
+  }
+  function describeAssistantError(error, context = {}) {
+    const status = Number(error?.status) || null;
+    const code = String(error?.code || "").toUpperCase();
+    const surface = context.surface || null;
+    if (error?.name === "AbortError") {
+      return { kind: "cancelled", message: "", retry: "none", recover: null };
+    }
+    if (isNetworkError(error, context.online)) {
+      return {
+        kind: "offline",
+        message: "I can't reach HirePool right now. Please check your internet connection. I'll try again as soon as you're back online.",
+        retry: "auto",
+        recover: "wait-online"
+      };
+    }
+    if (status === 429 || code === "RATE_LIMIT_EXCEEDED") {
+      return {
+        kind: "rate-limited",
+        message: "You're sending messages a little fast. Please wait a few seconds, then try again.",
+        retry: "manual",
+        recover: null,
+        retryAfterMs: 5e3
+      };
+    }
+    if (status === 401 || AUTH_CODES.has(code)) {
+      if (surface === "app") {
+        return {
+          kind: "signed-out",
+          message: "Your HirePool session has ended. Please log in again to continue.",
+          retry: "none",
+          recover: "reauthenticate"
+        };
+      }
+      return {
+        kind: "session-reset",
+        message: "Your session was refreshed. Please send your message again.",
+        retry: "manual",
+        recover: "reauthenticate"
+      };
+    }
+    if (status === 410 || code === "SESSION_EXPIRED") {
+      return {
+        kind: "conversation-expired",
+        message: "This conversation had expired, so I started a fresh one.",
+        retry: "auto",
+        recover: "new-conversation"
+      };
+    }
+    if (status === 413 || code === "FILE_TOO_LARGE") {
+      return { kind: "too-large", message: "That file is too large. Please choose a smaller one.", retry: "none", recover: null };
+    }
+    if (status === 400 || code === "VALIDATION_ERROR" || code === "MALFORMED_JSON") {
+      return {
+        kind: "invalid",
+        message: "I couldn't send that message. Please shorten it or rephrase it and try again.",
+        retry: "none",
+        recover: null
+      };
+    }
+    if (status === 403 && code === "SURFACE_NOT_ALLOWED") {
+      return {
+        kind: "not-available-here",
+        message: "That is only available in your HirePool dashboard after you log in.",
+        retry: "none",
+        recover: null
+      };
+    }
+    if (status === 502 || status === 503 || status === 504 || UPSTREAM_CODES.has(code)) {
+      return {
+        kind: "unavailable",
+        message: "I'm having trouble reaching HirePool right now. Nothing was changed. Please try again in a moment.",
+        retry: "manual",
+        recover: null
+      };
+    }
+    if (code === "STREAM_INTERRUPTED" || /stream(?:ing)? (?:response )?(?:ended|event)|malformed streaming|readable streaming/i.test(String(error?.message || ""))) {
+      return {
+        kind: "interrupted",
+        message: context.hadPartialReply ? "My reply was cut off. Please try again for the full answer." : "My reply was interrupted. Please try again.",
+        retry: "manual",
+        recover: null
+      };
+    }
+    return {
+      kind: "unexpected",
+      message: "Something went wrong on my side and I couldn't finish that. Nothing was changed. Please try again.",
+      retry: "manual",
+      recover: null
+    };
+  }
 
   // widget/src/hirepool-resume.js
   var HIREPOOL_RESUME_MAX_BYTES = 5 * 1024 * 1024;
@@ -1446,9 +1785,7 @@ var AssistantSDKBundle = (() => {
   }
   var APPROVED_VERIFICATION_ORIGINS = /* @__PURE__ */ new Set([
     "http://localhost:5173",
-    "http://127.0.0.1:5173",
-    "https://app.hirepool.ai",
-    "https://hirepool.ai"
+    "http://127.0.0.1:5173"
   ]);
   function isSafeVerificationUrl(rawUrl) {
     if (typeof rawUrl !== "string" || !rawUrl.trim()) return false;
@@ -1482,9 +1819,10 @@ var AssistantSDKBundle = (() => {
     return null;
   }
   var HirePoolSignupCoordinator = class {
-    constructor({ apiClient, onAuthenticated, onStateChange, onAddMessage } = {}) {
+    constructor({ apiClient, onAuthenticated, onHandoff, onStateChange, onAddMessage } = {}) {
       this.apiClient = apiClient;
       this.onAuthenticated = onAuthenticated;
+      this.onHandoff = onHandoff;
       this.onStateChange = onStateChange;
       this.onAddMessage = onAddMessage;
       this.state = HIREPOOL_SIGNUP_STATES.IDLE;
@@ -1693,6 +2031,13 @@ var AssistantSDKBundle = (() => {
           signupToken: this.session.signupToken,
           confirmedProfile: payload
         });
+        if (result?.handoff?.type === "app") {
+          if (this.onHandoff) {
+            await this.onHandoff({ ...result.handoff, role: result.handoff.role || this.selectedRole });
+          }
+          this.setState(HIREPOOL_SIGNUP_STATES.COMPLETED, { result });
+          return result;
+        }
         this.setState(HIREPOOL_SIGNUP_STATES.PROFILE_READBACK, { profile: result.profile });
         this.setState(HIREPOOL_SIGNUP_STATES.AUTH_SESSION_ESTABLISHED, { result });
         this.setState(HIREPOOL_SIGNUP_STATES.AUTHENTICATION_SMOKE_TEST);
@@ -2439,8 +2784,10 @@ var AssistantSDKBundle = (() => {
   }
 
   // widget/src/widget.js
+  var WEBSITE_UI_VERSION = "role-cards-4";
   var ICONS = {
-    chat: `<svg viewBox="0 0 40 40" fill="currentColor"><path d="M37.87 14.64v24.11h-7.54V27.51L19.09 38.75l-5.33-5.33 11.24-11.24H13.76V14.64h24.11z"/></svg>`,
+    chat: `<svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true" focusable="false"><path d="M7 3H21V17L16.5 12.5L7 22L2 17L11.5 7.5Z"/></svg>`,
+    launcherClose: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" aria-hidden="true" focusable="false"><path d="M6 6L18 18M18 6L6 18"/></svg>`,
     close: `<svg viewBox="0 0 24 24"><path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12z"/></svg>`,
     minimize: `<svg viewBox="0 0 24 24"><path d="M19 13H5v-2h14v2z"/></svg>`,
     refresh: `<svg viewBox="0 0 24 24"><path d="M17.65 6.35C16.2 4.9 14.21 4 12 4c-4.42 0-7.99 3.58-7.99 8s3.57 8 7.99 8c3.73 0 6.84-2.55 7.73-6h-2.08c-.82 2.33-3.04 4-5.65 4-3.31 0-6-2.69-6-6s2.69-6 6-6c1.66 0 3.14.69 4.22 1.78L13 11h7V4l-2.35 2.35z"/></svg>`,
@@ -2471,6 +2818,9 @@ var AssistantSDKBundle = (() => {
         apiClient: this.apiClient,
         onAuthenticated: async (session) => {
           await this._handleHirePoolSignupSuccess(session);
+        },
+        onHandoff: (handoff) => {
+          this._displaySignupHandoff(handoff);
         },
         onStateChange: (state, data) => {
           this._renderHirePoolSignupState(state, data);
@@ -2516,6 +2866,18 @@ var AssistantSDKBundle = (() => {
         window.addEventListener("message", this._authMessageHandler);
       }
       document.body.appendChild(this.hostElement);
+      if (this.options?.surface === "website" || this.options?.surface === "app") {
+        this.container.classList.add("ai-theme-hirepool");
+        if (this.textarea) this.textarea.placeholder = "Type your question\u2026";
+      }
+      if (this.options?.surface === "website") {
+        this.container.classList.add("ai-surface-website");
+      }
+      if (this.options?.surface === "website" && this.options?.behavior?.welcome) {
+        this.container.classList.add("ai-chat-welcome");
+      }
+      this._setupIdleNudges();
+      this._setupAutoOpen();
     }
     /**
      * Unmount widget and clean up DOM
@@ -2526,6 +2888,17 @@ var AssistantSDKBundle = (() => {
         this._authMessageHandler = null;
       }
       this._stopVerificationWatcher();
+      this._autoOpenController?.stop();
+      this._autoOpenController = null;
+      if (this._onlineHandler && typeof window !== "undefined") {
+        window.removeEventListener("online", this._onlineHandler);
+        this._onlineHandler = null;
+      }
+      this._idleNudge?.stop();
+      this._idleNudge = null;
+      for (const unsubscribe of this._idleNudgeUnsubscribes || []) unsubscribe();
+      this._idleNudgeUnsubscribes = [];
+      this._hideTeaser();
       if (this.abortController) {
         this.abortController.abort();
       }
@@ -2560,7 +2933,8 @@ var AssistantSDKBundle = (() => {
       launcherBtn.setAttribute("aria-expanded", "false");
       launcherBtn.innerHTML = `
       <span class="icon-chat">${ICONS.chat}</span>
-      <span class="icon-close">${ICONS.close}</span>
+      <span class="icon-close">${ICONS.launcherClose}</span>
+      <span class="ai-launcher-badge" aria-hidden="true">.ai</span>
     `;
       this.launcherBtn = launcherBtn;
       const panel = document.createElement("div");
@@ -2568,7 +2942,7 @@ var AssistantSDKBundle = (() => {
       panel.setAttribute("role", "dialog");
       panel.setAttribute("aria-modal", "true");
       panel.setAttribute("aria-label", name);
-      const avatarHtml = avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(name)} avatar"/>` : `<svg class="ai-avatar-icon" width="20" height="20" viewBox="0 0 40 40" fill="currentColor"><path d="M37.87 14.64v24.11h-7.54V27.51L19.09 38.75l-5.33-5.33 11.24-11.24H13.76V14.64h24.11z"/></svg>`;
+      const avatarHtml = avatarUrl ? `<img src="${escapeHtml(avatarUrl)}" alt="${escapeHtml(name)} avatar"/>` : `<span class="ai-avatar-icon">${ICONS.chat}</span>`;
       panel.innerHTML = `
       <header class="ai-header">
         <div class="ai-header-info">
@@ -2582,6 +2956,8 @@ var AssistantSDKBundle = (() => {
           </div>
         </div>
         <div class="ai-header-actions">
+          <button class="ai-header-signin" type="button" data-auth="signin">Sign in</button>
+          <button class="ai-header-signup" type="button" data-auth="signup">Sign up</button>
           <button class="ai-icon-btn btn-new-chat" type="button" title="New Conversation" aria-label="Start new conversation">
             ${ICONS.refresh}
           </button>
@@ -2590,10 +2966,20 @@ var AssistantSDKBundle = (() => {
           </button>
         </div>
       </header>
+      <div class="ai-auth-bar" role="group" aria-label="Account">
+        <button class="ai-auth-btn ai-auth-signin" type="button" data-auth="signin">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 17l1.4-1.4L8.8 13H20v-2H8.8l2.6-2.6L10 7l-5 5 5 5zM4 5h7V3H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h7v-2H4V5z" transform="matrix(-1 0 0 1 24 0)"/></svg>
+          Sign in
+        </button>
+        <button class="ai-auth-btn ai-auth-signup" type="button" data-auth="signup">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 12a4 4 0 1 0-4-4 4 4 0 0 0 4 4zm0-6a2 2 0 1 1-2 2 2 2 0 0 1 2-2zm0 8c-2.7 0-8 1.3-8 4v2h16v-2c0-2.7-5.3-4-8-4zm-6 4c.2-.7 3.3-2 6-2s5.8 1.3 6 2H9zM6 10V7H4v3H1v2h3v3h2v-3h3v-2H6z"/></svg>
+          Sign up
+        </button>
+      </div>
 
       <main class="ai-body" role="log" aria-live="polite" aria-relevant="additions text">
         <div class="ai-welcome-box">
-          <div class="ai-welcome-greeting">${escapeHtml(greeting)}</div>
+          <div class="ai-welcome-greeting">${parseMarkdown(String(greeting || ""))}</div>
           ${suggestedPrompts && suggestedPrompts.length > 0 ? `
             <div class="ai-suggested-prompts">
             <div class="ai-suggested-prompts-label">Suggested Prompts</div>
@@ -2650,6 +3036,10 @@ var AssistantSDKBundle = (() => {
         this.attachBtn.setAttribute("aria-label", this.attachBtn.title);
       }
       this.fileInput.accept = this._isHirePoolResumeEnabled() ? ".pdf,application/pdf" : this.options.documentUpload?.allowedExtensions?.join(",") || ".pdf,.docx,.txt";
+      if (this.options?.surface === "website") {
+        this.attachBtn.title = "Upload a resume, job description or candidate list (PDF, DOCX, TXT)";
+        this.attachBtn.setAttribute("aria-label", this.attachBtn.title);
+      }
       this.body = panel.querySelector(".ai-body");
       container.appendChild(panel);
       container.appendChild(launcherBtn);
@@ -2658,6 +3048,17 @@ var AssistantSDKBundle = (() => {
     _attachEvents() {
       this.launcherBtn.addEventListener("click", () => {
         this.toggle();
+      });
+      this.panel.querySelectorAll("[data-auth]").forEach((button) => {
+        button.addEventListener("click", () => {
+          if (button.dataset.auth === "signin") {
+            this._goToLogin();
+          } else if (!this.isGenerating) {
+            this._clearRoleCards();
+            this._clearQuickReplies();
+            void this.sendMessage("Sign up for HirePool");
+          }
+        });
       });
       this.panel.querySelector(".btn-close").addEventListener("click", () => {
         this.close();
@@ -2704,9 +3105,14 @@ var AssistantSDKBundle = (() => {
           this.fileInput.click();
         });
         this.fileInput.addEventListener("change", (e) => {
-          const file = e.target.files?.[0];
+          const files = Array.from(e.target.files || []);
+          const file = files[0];
           if (!file) return;
           this.fileInput.value = "";
+          if (this.options?.surface === "app" && this._userRole === "consultancy" && this._assistantHandlers) {
+            this._handleBenchFiles(files.slice(0, 20));
+            return;
+          }
           if (this._isHirePoolResumeEnabled()) {
             this._handleHirePoolResumeFile(file);
           } else {
@@ -2749,7 +3155,7 @@ var AssistantSDKBundle = (() => {
           }
           const lastUserMsg = [...this.messages].reverse().find((m) => m.role === "user");
           if (lastUserMsg) {
-            this.sendMessage(lastUserMsg.content);
+            this.sendMessage(lastUserMsg.content, { displayUserMessage: false });
           }
         }
       });
@@ -2799,6 +3205,11 @@ var AssistantSDKBundle = (() => {
           this._clearSessionAndFallbackToGuest();
         });
       }
+      if (this.options?.surface === "website" && this.storage.get("website_ui_version", null) !== WEBSITE_UI_VERSION) {
+        this.storage.set("messages", []);
+        this.storage.saveConversationId(null);
+        this.storage.set("website_ui_version", WEBSITE_UI_VERSION);
+      }
       const savedConvoId = this.storage.getConversationId();
       const savedMessages = this.storage.get("messages", []);
       this.activeConversationId = savedConvoId;
@@ -2807,6 +3218,21 @@ var AssistantSDKBundle = (() => {
         this.messages.forEach((msg) => {
           this._renderMessageBubble(msg.role, msg.content, false, msg.action);
         });
+        const last = this.messages[this.messages.length - 1];
+        if (last?.role === "assistant" && Array.isArray(last.quickReplies) && last.quickReplies.length) {
+          this._renderQuickReplies(this.messagesList.lastElementChild, last.quickReplies);
+        }
+        const welcomeRowIndex = this.messages.findIndex((m) => m.appWelcome);
+        if (welcomeRowIndex >= 0 && this.messagesList.children[welcomeRowIndex]) {
+          this.messagesList.children[welcomeRowIndex].dataset.appWelcome = "1";
+          this.container?.classList.add("ai-chat-welcome");
+        }
+        if (!this.messages.some((m) => m.role === "user")) {
+          const index = this.messages.findIndex((m) => Array.isArray(m.roleCards) && m.roleCards.length);
+          if (index >= 0) this._renderRoleCards(this.messagesList.children[index], this.messages[index].roleCards);
+          const welcomeIndex = this.messages.findIndex((m) => m.appWelcome && m.profileProgress);
+          if (welcomeIndex >= 0) this._renderProfileProgress(this.messagesList.children[welcomeIndex], this.messages[welcomeIndex].profileProgress);
+        }
       }
       const wasOpen = this.storage.get("is_open", false);
       if (wasOpen) {
@@ -2938,19 +3364,26 @@ var AssistantSDKBundle = (() => {
       this.events.emit("conversation:cleared");
     }
     _persistState() {
+      this._syncWebsiteChatState();
       this.storage.set("messages", this.messages.map((message) => message.action?.action === "hirepool_begin_login" || message.action?.parameters?.continuationReference ? { ...message, action: { ...message.action, parameters: {} } } : message));
       this.storage.saveConversationId(this.activeConversationId);
       this.storage.set("is_open", this.isOpen);
     }
-    open() {
+    open({ focus = true, source = "user" } = {}) {
       if (this.isOpen) return;
       this.isOpen = true;
+      this._autoOpened = source === "auto";
+      this._hideTeaser();
       this.container.classList.add("is-open");
       this.launcherBtn.setAttribute("aria-expanded", "true");
+      this._maybeShowWebsiteWelcome();
+      if (this.options?.surface === "app" && !this.messages.some((m) => m.role === "user")) {
+        this._idleNudge?.onAssistantMessage("welcome");
+      }
       this._persistState();
-      this.events.emit("open");
+      this.events.emit("open", { source });
       setTimeout(() => {
-        this.textarea.focus();
+        if (focus) this.textarea.focus();
         this._scrollToBottom();
       }, 100);
     }
@@ -2961,7 +3394,620 @@ var AssistantSDKBundle = (() => {
       this.launcherBtn.setAttribute("aria-expanded", "false");
       this._persistState();
       this.events.emit("close");
+      if (this._autoOpened && !this.messages.some((m) => m.role === "user")) {
+        this._autoOpenController?.snooze();
+      }
+      this._autoOpened = false;
       this.launcherBtn.focus();
+    }
+    /** Website bot: welcome, introduce HirePool, and ask what the visitor needs. */
+    _maybeShowWebsiteWelcome() {
+      const welcome = this.options?.behavior?.welcome;
+      if (this.options?.surface !== "website" || !welcome?.message || this.messages.length > 0) return;
+      this._postLocalAssistantMessage(welcome.message, welcome.quickReplies || [], { roleCards: welcome.roleCards });
+      this._idleNudge?.onAssistantMessage("welcome");
+    }
+    /**
+     * Show an assistant message that is generated by the widget (welcome or
+     * follow-up). It is kept in this tab's history but never sent to the server.
+     * A follow-up replaces the previous unanswered follow-up instead of stacking.
+     */
+    _postLocalAssistantMessage(text, quickReplies = [], { roleCards = null, nudge = false } = {}) {
+      if (!nudge || Array.isArray(quickReplies) && quickReplies.length) this._clearQuickReplies();
+      const previous = this.messages[this.messages.length - 1];
+      if (nudge && previous?.nudge && this.messagesList?.lastElementChild) {
+        this.messagesList.lastElementChild.remove();
+        this.messages.pop();
+      }
+      const row = this._renderMessageBubble("assistant", text, true);
+      const replies = Array.isArray(quickReplies) ? quickReplies.filter((r) => typeof r === "string" && r.trim()).slice(0, 5) : [];
+      if (replies.length) this._renderQuickReplies(row, replies);
+      const cards = Array.isArray(roleCards) ? roleCards.filter((c) => c?.title && c?.prompt).slice(0, 4) : [];
+      if (cards.length) this._renderRoleCards(row, cards);
+      this.messages.push({
+        role: "assistant",
+        content: text,
+        local: true,
+        ...nudge ? { nudge: true } : {},
+        ...cards.length ? { roleCards: cards } : {},
+        ...replies.length ? { quickReplies: replies } : {}
+      });
+      this._stampLatestReply();
+      this._persistState();
+    }
+    /** Website: a small "HirePool · 10:42" under the latest assistant reply only. */
+    _stampLatestReply() {
+      if (!["website", "app"].includes(this.options?.surface) || !this.messagesList) return;
+      this.messagesList.querySelectorAll(".ai-msg-meta").forEach((el) => el.remove());
+      const bubbles = this.messagesList.querySelectorAll(".ai-message-row.assistant > .ai-bubble");
+      const bubble = bubbles[bubbles.length - 1];
+      if (!bubble) return;
+      const meta = document.createElement("div");
+      meta.className = "ai-msg-meta";
+      let time = "";
+      try {
+        time = (/* @__PURE__ */ new Date()).toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+      } catch {
+        time = "";
+      }
+      meta.textContent = time ? `HirePool \xB7 ${time}` : "HirePool";
+      bubble.insertAdjacentElement("afterend", meta);
+    }
+    /** Website welcome: large tappable cards for job seekers, companies, and agencies. */
+    _renderRoleCards(row, cards) {
+      if (!row || !Array.isArray(cards) || !cards.length) return;
+      const icons = {
+        search: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10.5 3a7.5 7.5 0 0 1 5.96 12.05l4.25 4.24-1.42 1.42-4.24-4.25A7.5 7.5 0 1 1 10.5 3zm0 2a5.5 5.5 0 1 0 0 11 5.5 5.5 0 0 0 0-11z"/></svg>',
+        clipboard: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 2h6a2 2 0 0 1 2 2h2a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2h2a2 2 0 0 1 2-2zm0 2v2h6V4H9zM5 6v14h14V6h-2v2H7V6H5zm3 5h8v2H8v-2zm0 4h6v2H8v-2z"/></svg>',
+        chart: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 3h2v16h16v2H3V3zm4 9h3v6H7v-6zm5-5h3v11h-3V7zm5 3h3v8h-3v-8z"/></svg>',
+        plus: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 5h2v6h6v2h-6v6h-2v-6H5v-2h6V5z"/></svg>',
+        "user-check": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 8c3.3 0 7 1.6 7 4.5V20H2v-1.5C2 15.6 5.7 14 9 14zm0 2c-2.5 0-4.6 1-4.9 2h9.8c-.3-1-2.4-2-4.9-2zm12.3-6.7 1.4 1.4-4.7 4.7-2.7-2.7 1.4-1.4 1.3 1.3 3.3-3.3z"/></svg>',
+        "file-upload": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8l-6-6zm4 18H6V4h7v5h5v11zM8 15l4-4 4 4h-3v4h-2v-4H8z"/></svg>',
+        edit: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 17.25V21h3.75L17.8 9.94l-3.75-3.75L3 17.25zm2.92 2.33H5v-.92l9.06-9.06.92.92L5.92 19.58zM20.7 7.04a1 1 0 0 0 0-1.41l-2.34-2.34a1 1 0 0 0-1.41 0l-1.83 1.83 3.75 3.75 1.83-1.83z"/></svg>',
+        send: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2.01 21 23 12 2.01 3 2 10l15 2-15 2z"/></svg>',
+        "list-check": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 5h2v2H3V5zm4 0h14v2H7V5zM3 11h2v2H3v-2zm4 0h14v2H7v-2zm-4 6h2v2H3v-2zm4 0h14v2H7v-2z"/></svg>',
+        "user-plus": '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm0 8c3.3 0 7 1.6 7 4.5V20H3v-1.5C3 15.6 6.7 14 10 14zm0 2c-2.5 0-4.6 1-4.9 2h9.8c-.3-1-2.4-2-4.9-2zM19 8h2v2h2v2h-2v2h-2v-2h-2v-2h2V8z"/></svg>',
+        briefcase: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 3h4a2 2 0 0 1 2 2v2h3a2 2 0 0 1 2 2v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V9a2 2 0 0 1 2-2h3V5a2 2 0 0 1 2-2zm0 2v2h4V5h-4zM5 9v4h14V9H5zm0 6v3h14v-3h-6v1h-2v-1H5z"/></svg>',
+        building: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 21V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v4h2a2 2 0 0 1 2 2v10h1v2H2v-2h2zm2 0h4v-3h2v3h2V5H6v16zm10 0h2V11h-2v10zM8 7h2v2H8V7zm0 4h2v2H8v-2zm4-4h2v2h-2V7zm0 4h2v2h-2v-2z"/></svg>',
+        users: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 4a4 4 0 1 1 0 8 4 4 0 0 1 0-8zm0 2a2 2 0 1 0 0 4 2 2 0 0 0 0-4zm7.5-1a3.5 3.5 0 1 1 0 7 3.5 3.5 0 0 1 0-7zm0 2a1.5 1.5 0 1 0 0 3 1.5 1.5 0 0 0 0-3zM9 13c3.3 0 6 1.8 6 4.5V20H3v-2.5C3 14.8 5.7 13 9 13zm0 2c-2.2 0-4 1-4 2.5v.5h8v-.5c0-1.5-1.8-2.5-4-2.5zm8 0c2.4.2 4 1.4 4 3v2h-4v-2c0-1.1-.4-2.1-1.2-2.9.4-.1.8-.1 1.2-.1z"/></svg>'
+      };
+      const chevron = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9.3 6.3a1 1 0 0 1 1.4 0l5 5a1 1 0 0 1 0 1.4l-5 5a1 1 0 0 1-1.4-1.4l4.3-4.3-4.3-4.3a1 1 0 0 1 0-1.4z"/></svg>';
+      const group = document.createElement("div");
+      group.className = "ai-role-cards";
+      group.setAttribute("role", "group");
+      group.setAttribute("aria-label", "Choose what brings you here");
+      for (const card of cards) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ai-role-card";
+        button.innerHTML = `
+        <span class="ai-role-card-icon">${icons[card.icon] || icons.briefcase}</span>
+        <span class="ai-role-card-text">
+          <span class="ai-role-card-title">${escapeHtml(card.title)}</span>
+          ${card.subtitle ? `<span class="ai-role-card-subtitle">${escapeHtml(card.subtitle)}</span>` : ""}
+        </span>
+        <span class="ai-role-card-chevron">${chevron}</span>
+      `;
+        button.addEventListener("click", () => {
+          this._clearRoleCards();
+          this._clearQuickReplies();
+          if (typeof card.onSelect === "function") card.onSelect();
+          else void this.sendMessage(card.prompt);
+        });
+        group.appendChild(button);
+      }
+      row.appendChild(group);
+      this._scrollToBottom();
+    }
+    _clearRoleCards() {
+      this.messagesList?.querySelectorAll(".ai-role-cards").forEach((el) => el.remove());
+    }
+    _renderQuickReplies(row, replies) {
+      if (!row) return;
+      const container = document.createElement("div");
+      container.className = "ai-quick-replies";
+      container.setAttribute("role", "group");
+      container.setAttribute("aria-label", "Suggested replies");
+      for (const reply of replies) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "ai-quick-reply";
+        button.textContent = reply;
+        button.addEventListener("click", () => {
+          this._clearQuickReplies();
+          void this.sendMessage(reply);
+        });
+        container.appendChild(button);
+      }
+      row.appendChild(container);
+      this._scrollToBottom();
+    }
+    _clearQuickReplies() {
+      this.messagesList?.querySelectorAll(".ai-quick-replies").forEach((el) => el.remove());
+    }
+    /** Website bot: re-engage a quiet visitor a few seconds after the assistant speaks. */
+    _setupIdleNudges() {
+      const config = this.options?.behavior?.idleNudge;
+      const surface = this.options?.surface;
+      if (surface !== "website" && surface !== "app" || !config?.enabled) return;
+      this._nudgeUsed = new Set(this.messages.filter((m) => m.local).map((m) => m.content));
+      const activeSignupStates = /* @__PURE__ */ new Set(["idle", "completed", "cancelled", "error"]);
+      this._idleNudge = new IdleNudgeController({
+        delayMs: config.delayMs,
+        maxConsecutive: config.maxConsecutive,
+        pickNudge: (stage) => pickIdleNudge(config, stage, this._nudgeUsed, this._userRole || null),
+        post: (nudge) => {
+          this._postLocalAssistantMessage(nudge.text, nudge.quickReplies, { nudge: true });
+          this.events.emit("idle-nudge:shown", { text: nudge.text });
+        },
+        isPaused: () => typeof document !== "undefined" && document.visibilityState === "hidden",
+        canNudge: () => this.isOpen && !this.isGenerating && !this.textarea?.value?.trim() && activeSignupStates.has(this.hirePoolSignup?.state || "idle")
+      });
+      this.textarea?.addEventListener("input", () => this._idleNudge?.onUserActivity());
+      this._idleNudgeUnsubscribes = [
+        this.events.on("message:sent", () => {
+          this._clearQuickReplies();
+          this._clearRoleCards();
+          this._idleNudge?.onUserMessage();
+        }),
+        this.events.on("message:received", (message) => {
+          this._stampLatestReply();
+          if (surface === "website") {
+            if (!message?.action && /Shall I create one for you now\?/i.test(String(message?.content || ""))) {
+              const rows = this.messagesList?.querySelectorAll(".ai-message-row.assistant");
+              const last = rows?.[rows.length - 1];
+              if (last) {
+                this._clearQuickReplies();
+                this._renderQuickReplies(last, ["Sign me up", "Not now"]);
+              }
+            }
+          }
+          if (message?.action) {
+            this._idleNudge?.onUserActivity();
+          } else {
+            const asked = /\?\s*\**\s*$/.test(String(message?.content || "").trim());
+            this._idleNudge?.onAssistantMessage(asked ? "question" : "answer");
+          }
+        }),
+        this.events.on("close", () => this._idleNudge?.onUserActivity()),
+        // "New chat" starts the welcome and follow-ups from the beginning.
+        this.events.on("conversation:cleared", () => {
+          this._nudgeUsed = /* @__PURE__ */ new Set();
+          this._visitorSignupRole = null;
+          this._idleNudge?.onUserMessage();
+          if (this.isOpen) {
+            this._maybeShowWebsiteWelcome();
+            this._persistState();
+          }
+          if (this.options?.surface === "app" && this._appWelcome) {
+            this.showAppWelcome(this._appWelcome);
+          }
+        })
+      ];
+    }
+    _setupAutoOpen() {
+      const config = this.options?.behavior?.autoOpen;
+      if (this.options?.surface !== "website" || !config?.enabled || typeof window === "undefined") return;
+      this._autoOpenController = new AutoOpenController({
+        config,
+        win: window,
+        isOpen: () => this.isOpen,
+        hasConversation: () => this.messages.length > 0,
+        openPanel: () => this.open({ focus: false, source: "auto" }),
+        showTeaser: (text) => this._showTeaser(text)
+      });
+      this._autoOpenController.start();
+    }
+    /**
+     * In-app bot: ask about one missing profile detail. Shown at most once per
+     * browser session; "Later" hides it for 7 days for this user.
+     */
+    /**
+     * In-app bot: list the missing profile fields and offer to complete them now.
+     * Shown once per login session (and again after each save while fields are
+     * still missing). "Later" hides it for a day.
+     * @returns {boolean} whether the card was shown
+     */
+    showProfileNudge(nudge, userId, { force = false, continuing = false } = {}) {
+      if (!nudge?.text || !this.messagesList) return false;
+      const key = `hirepool-assistant:profile-nudge:${String(userId || "user").slice(0, 80)}`;
+      const now = Date.now();
+      if (!force) {
+        try {
+          if (sessionStorage.getItem(key) === "shown") return false;
+          if (Number(localStorage.getItem(`${key}:snoozed-until`) || 0) > now) return false;
+          sessionStorage.setItem(key, "shown");
+        } catch {
+          if (this._profileNudgeShown) return false;
+        }
+      }
+      this._profileNudgeShown = true;
+      this.messagesList.querySelectorAll(".ai-nudge-row").forEach((el) => el.remove());
+      const row = document.createElement("div");
+      row.className = "ai-message-row assistant ai-nudge-row";
+      const bubble = document.createElement("div");
+      bubble.className = "ai-bubble ai-nudge";
+      const text = continuing ? `Saved \u2705 ${nudge.text}` : nudge.text;
+      bubble.innerHTML = `
+      <div class="ai-nudge-text">${parseMarkdown(text)}</div>
+      <div class="ai-action-controls">
+        <button type="button" class="ai-btn-action-confirm ai-nudge-accept">${continuing ? "Continue" : "Complete my profile"}</button>
+        <button type="button" class="ai-btn-action-cancel ai-nudge-later">Later</button>
+      </div>
+    `;
+      const remove = () => row.parentNode && row.parentNode.removeChild(row);
+      bubble.querySelector(".ai-nudge-accept").addEventListener("click", () => {
+        remove();
+        this.events.emit("profile-nudge:accepted", { field: nudge.field });
+        if (this._profileFormHandlers) {
+          void this.showProfileForm("missing");
+        } else {
+          void this.sendMessage(nudge.acceptPrompt || "Update my profile");
+        }
+      });
+      bubble.querySelector(".ai-nudge-later").addEventListener("click", () => {
+        remove();
+        try {
+          localStorage.setItem(`${key}:snoozed-until`, String(Date.now() + 3 * 24 * 60 * 60 * 1e3));
+        } catch {
+        }
+        this.events.emit("profile-nudge:snoozed", { field: nudge.field });
+      });
+      row.appendChild(bubble);
+      this.messagesList.appendChild(row);
+      this._scrollToBottom();
+      this.events.emit("profile-nudge:shown", { field: nudge.field, missing: nudge.missing || [] });
+      return true;
+    }
+    /**
+     * Dashboard: show the personal welcome as an interactive chat message —
+     * a short hello, role task cards, quick buttons, and profile progress with a
+     * "Complete now" button while the profile is incomplete.
+     * Only when no conversation is under way. Returns whether it was shown.
+     */
+    showAppWelcome(welcome) {
+      if (!welcome || !this.messagesList || this.options?.surface !== "app") return false;
+      this._appWelcome = welcome;
+      this.container?.classList.add("ai-chat-welcome");
+      if (this.messages.length > 0) {
+        this.updateProfileProgress(welcome.profileProgress || null);
+        return false;
+      }
+      const text = [
+        `**${welcome.salutation || "Hi! \u{1F44B}"}**`,
+        welcome.question || "What would you like to do today?"
+      ].join("\n");
+      this._postLocalAssistantMessage(text, Array.isArray(welcome.quickReplies) ? welcome.quickReplies : [], {
+        roleCards: Array.isArray(welcome.actions) ? welcome.actions : []
+      });
+      this.messages[this.messages.length - 1].appWelcome = true;
+      if (this.messagesList.lastElementChild) this.messagesList.lastElementChild.dataset.appWelcome = "1";
+      if (welcome.profileProgress) this.messages[this.messages.length - 1].profileProgress = welcome.profileProgress;
+      if (welcome.profileProgress) this._renderProfileProgress(this.messagesList.lastElementChild, welcome.profileProgress);
+      this.container?.classList.add("ai-chat-welcome");
+      this._persistState();
+      return true;
+    }
+    /**
+     * Dashboard: refresh (or remove, once complete) the progress card in the
+     * welcome so it never shows an old percentage.
+     */
+    updateProfileProgress(progress) {
+      const index = this.messages.findIndex((m) => m.appWelcome);
+      if (index < 0) return;
+      const message = this.messages[index];
+      if (progress) message.profileProgress = progress;
+      else delete message.profileProgress;
+      const row = this.messagesList?.querySelector('[data-app-welcome="1"]');
+      if (row) {
+        if (progress) this._renderProfileProgress(row, progress);
+        else row.querySelector(".ai-profile-progress")?.remove();
+      }
+      if (this._appWelcome) this._appWelcome = { ...this._appWelcome, profileProgress: progress || null };
+      this._persistState();
+    }
+    _renderProfileProgress(row, progress) {
+      if (!row || !progress) return;
+      row.querySelector(".ai-profile-progress")?.remove();
+      const pct = Number.isFinite(progress.completion) ? Math.max(0, Math.min(100, progress.completion)) : null;
+      const card = document.createElement("div");
+      card.className = "ai-profile-progress";
+      const missing = Array.isArray(progress.missing) ? progress.missing : [];
+      card.innerHTML = `
+      <div class="ai-pp-top">
+        <span class="ai-pp-title">Your ${escapeHtml(progress.profileWord || "profile")} is ${pct !== null ? `<strong>${pct}%</strong> complete` : "not complete yet"}</span>
+        <span class="ai-pp-count">${progress.remaining} missing</span>
+      </div>
+      ${pct !== null ? `<div class="ai-pp-bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct}"><span style="width:${pct}%"></span></div>` : ""}
+      ${missing.length ? `<div class="ai-pp-missing">Missing: ${escapeHtml(missing.join(", "))}${progress.remaining > missing.length ? "\u2026" : ""}</div>` : ""}
+      <button type="button" class="ai-pp-btn">Complete now</button>
+    `;
+      card.querySelector(".ai-pp-btn").addEventListener("click", () => {
+        this.events.emit("profile-nudge:accepted", { source: "welcome" });
+        if (this._profileFormHandlers) {
+          void this.showProfileForm("missing");
+        } else {
+          void this.sendMessage("Update my profile");
+        }
+      });
+      const bubble = row.querySelector(":scope > .ai-bubble");
+      const meta = row.querySelector(":scope > .ai-msg-meta");
+      (meta || bubble)?.insertAdjacentElement("afterend", card);
+    }
+    /** In-app bot: how to load and save the profile form (set by the SDK). */
+    setProfileFormHandlers(handlers) {
+      this._profileFormHandlers = handlers && typeof handlers.load === "function" && typeof handlers.save === "function" ? handlers : null;
+    }
+    /**
+     * In-app bot: a fill-in form for the user's profile.
+     * mode 'missing' shows only empty fields; 'all' shows everything to edit.
+     * `overrides` pre-fill values (e.g. from a review card being edited).
+     */
+    async showProfileForm(mode = "all", { overrides = null, fillEmptyOnly = false, sourceLabel = null } = {}) {
+      if (!this._profileFormHandlers || !this.messagesList) return false;
+      if (!this.isOpen) this.open({ focus: false });
+      this.messagesList.querySelectorAll(".ai-profile-form-row, .ai-nudge-row").forEach((el) => el.remove());
+      this._clearQuickReplies();
+      const row = document.createElement("div");
+      row.className = "ai-message-row assistant ai-signup-row ai-profile-form-row";
+      const bubble = document.createElement("div");
+      bubble.className = "ai-bubble ai-profile-form-card";
+      bubble.innerHTML = '<div class="ai-profile-form-loading">Loading your profile\u2026</div>';
+      row.appendChild(bubble);
+      this.messagesList.appendChild(row);
+      this._scrollToBottom();
+      let form;
+      try {
+        form = await this._profileFormHandlers.load(mode);
+      } catch (error) {
+        bubble.innerHTML = `<div class="ai-profile-form-error">${escapeHtml(error?.message || "I couldn't load your profile just now. Please try again in a moment.")}</div>`;
+        return false;
+      }
+      if (!form || !Array.isArray(form.fields)) {
+        bubble.innerHTML = `<div class="ai-profile-form-error">I couldn't load your profile just now. Please try again in a moment.</div>`;
+        return false;
+      }
+      if (mode === "missing" && form.fields.length === 0 && !(form.chatSections || []).length) {
+        row.remove();
+        this.updateProfileProgress(null);
+        this.postAssistantNote?.("\u{1F389} Your profile is already complete. Say **edit my profile** any time to change something.");
+        return true;
+      }
+      this._renderProfileForm(bubble, form, overrides || {}, { fillEmptyOnly, sourceLabel });
+      this.events.emit("profile-form:shown", { mode, fields: form.fields.map((f) => f.key) });
+      return true;
+    }
+    _renderProfileForm(bubble, form, overrides, { fillEmptyOnly = false, sourceLabel = null } = {}) {
+      const fieldId = (key) => `ai-pf-${key}`;
+      const isEmpty = (value) => value === null || value === void 0 || value === "" || Array.isArray(value) && value.length === 0;
+      const display = (value) => Array.isArray(value) ? value.join(", ") : String(value ?? "");
+      const usesOverride = (field) => Object.hasOwn(overrides, field.key) && !isEmpty(overrides[field.key]) && (!fillEmptyOnly || isEmpty(field.value));
+      const differs = (field) => fillEmptyOnly && Object.hasOwn(overrides, field.key) && !isEmpty(overrides[field.key]) && !isEmpty(field.value) && display(overrides[field.key]).toLowerCase() !== display(field.value).toLowerCase();
+      const valueOf = (field) => usesOverride(field) ? overrides[field.key] : field.value;
+      const controlHtml = (field) => {
+        const value = valueOf(field);
+        const common = `id="${fieldId(field.key)}" name="${escapeHtml(field.key)}" class="ai-form-input"`;
+        const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
+        switch (field.type) {
+          case "textarea":
+            return `<textarea ${common} rows="3"${placeholder}>${escapeHtml(String(value ?? ""))}</textarea>`;
+          case "select":
+            return `<select ${common}><option value="">Choose\u2026</option>${(field.options || []).map((o) => `<option value="${escapeHtml(o.value)}"${o.value === value ? " selected" : ""}>${escapeHtml(o.label)}</option>`).join("")}</select>`;
+          case "multiselect": {
+            const selected = new Set(Array.isArray(value) ? value : []);
+            return `<div class="ai-pf-chips" role="group" aria-label="${escapeHtml(field.label)}">${(field.options || []).map((o) => `
+            <label class="ai-pf-chip"><input type="checkbox" name="${escapeHtml(field.key)}" value="${escapeHtml(o.value)}"${selected.has(o.value) ? " checked" : ""}><span>${escapeHtml(o.label)}</span></label>`).join("")}</div>`;
+          }
+          case "tags":
+            return `<input type="text" ${common}${placeholder} value="${escapeHtml(Array.isArray(value) ? value.join(", ") : String(value ?? ""))}">`;
+          case "number":
+            return `<input type="number" inputmode="numeric" ${common}${placeholder}${field.min !== void 0 ? ` min="${field.min}"` : ""}${field.max !== void 0 ? ` max="${field.max}"` : ""} value="${value === null || value === void 0 ? "" : escapeHtml(String(value))}">`;
+          default:
+            return `<input type="${field.type === "tel" ? "tel" : field.type === "url" ? "url" : "text"}" ${common}${placeholder} value="${escapeHtml(String(value ?? ""))}">`;
+        }
+      };
+      const chatSections = form.chatSections || [];
+      bubble.innerHTML = `
+      <form class="ai-profile-form" novalidate>
+        <div class="ai-pf-head">
+          <div class="ai-pf-title">${escapeHtml(form.title || "Your profile")}</div>
+          <div class="ai-pf-subtitle">${escapeHtml(form.subtitle || "")}${Number.isFinite(form.completion) ? ` <span class="ai-pf-progress">${form.completion}% complete</span>` : ""}</div>
+        </div>
+        ${form.fields.map((field) => `
+          <div class="ai-pf-field${field.missing ? " is-missing" : ""}" data-key="${escapeHtml(field.key)}">
+            <label class="ai-pf-label" for="${fieldId(field.key)}">${escapeHtml(field.label)}${usesOverride(field) && sourceLabel ? ` <span class="ai-pf-source">${escapeHtml(sourceLabel)}</span>` : field.missing ? ' <span class="ai-pf-missing">Missing</span>' : ""}</label>
+            ${controlHtml(field)}
+            ${differs(field) ? `<div class="ai-pf-hint ai-pf-diff">Resume says: <strong>${escapeHtml(display(overrides[field.key]).slice(0, 120))}</strong> <button type="button" class="ai-pf-use" data-key="${escapeHtml(field.key)}">Use this</button></div>` : ""}
+            ${field.hint ? `<div class="ai-pf-hint">${escapeHtml(field.hint)}</div>` : ""}
+            <div class="ai-pf-error" role="alert"></div>
+          </div>`).join("")}
+        ${chatSections.length ? `
+          <div class="ai-pf-chat-sections">
+            <div class="ai-pf-hint">These need a few details each, so we'll add them together in chat:</div>
+            ${chatSections.map((s) => `<button type="button" class="ai-pf-chat-btn" data-prompt="${escapeHtml(s.prompt)}">${escapeHtml(s.missing ? `Add ${s.label.toLowerCase()}` : `Edit ${s.label.toLowerCase()}`)}</button>`).join("")}
+          </div>` : ""}
+        <div class="ai-pf-form-error" role="alert"></div>
+        <div class="ai-pf-actions">
+          <button type="submit" class="ai-btn-action-confirm ai-pf-save">Save</button>
+          <button type="button" class="ai-btn-action-cancel ai-pf-cancel">Cancel</button>
+        </div>
+      </form>
+    `;
+      const formEl = bubble.querySelector("form");
+      const saveBtn = bubble.querySelector(".ai-pf-save");
+      const formError = bubble.querySelector(".ai-pf-form-error");
+      const row = bubble.closest(".ai-message-row");
+      bubble.querySelectorAll(".ai-pf-use").forEach((button) => {
+        button.addEventListener("click", () => {
+          const key = button.dataset.key;
+          const field = form.fields.find((f) => f.key === key);
+          const value = overrides[key];
+          if (!field) return;
+          if (field.type === "multiselect") {
+            const wanted = new Set(Array.isArray(value) ? value : []);
+            formEl.querySelectorAll(`input[name="${CSS.escape(key)}"]`).forEach((input) => {
+              input.checked = wanted.has(input.value);
+            });
+          } else {
+            const el = formEl.querySelector(`#${CSS.escape(fieldId(key))}`);
+            if (el) el.value = Array.isArray(value) ? value.join(", ") : String(value);
+          }
+          button.closest(".ai-pf-diff")?.remove();
+        });
+      });
+      bubble.querySelectorAll(".ai-pf-chat-btn").forEach((button) => {
+        button.addEventListener("click", () => {
+          row?.remove();
+          void this.sendMessage(button.dataset.prompt);
+        });
+      });
+      bubble.querySelector(".ai-pf-cancel").addEventListener("click", () => {
+        row?.remove();
+        this.events.emit("profile-form:cancelled");
+      });
+      formEl.addEventListener("input", (event) => {
+        const wrap = event.target.closest?.(".ai-pf-field");
+        if (wrap) {
+          wrap.classList.remove("has-error");
+          wrap.querySelector(".ai-pf-error").textContent = "";
+        }
+      });
+      formEl.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const values = {};
+        for (const field of form.fields) {
+          if (field.type === "multiselect") {
+            values[field.key] = [...formEl.querySelectorAll(`input[name="${CSS.escape(field.key)}"]:checked`)].map((i) => i.value);
+          } else {
+            const el = formEl.querySelector(`#${CSS.escape(fieldId(field.key))}`);
+            values[field.key] = el ? el.value : "";
+          }
+        }
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving\u2026";
+        formError.textContent = "";
+        bubble.querySelectorAll(".ai-pf-field.has-error").forEach((el) => {
+          el.classList.remove("has-error");
+          el.querySelector(".ai-pf-error").textContent = "";
+        });
+        try {
+          const result = await this._profileFormHandlers.save(values);
+          if (!result?.saved) {
+            formError.textContent = result?.message || "Nothing changed, so there was nothing to save.";
+            saveBtn.disabled = false;
+            saveBtn.textContent = "Save";
+            return;
+          }
+          row?.remove();
+          const savedList = (result.changed || []).slice(0, 6).join(", ");
+          const progress = Number.isFinite(result.completion) ? ` Your profile is now **${result.completion}% complete**.` : "";
+          const note = result.partial && result.message ? `
+
+${result.message}` : "";
+          const rest = result.missingCount > 0 ? `
+
+${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missing. Say **complete my profile** whenever you have a moment.` : "\n\n\u{1F389} Your profile is complete. Nice work!";
+          this.postAssistantNote?.(`\u2705 Saved${savedList ? `: ${savedList}` : ""}.${progress}${note}${rest}`);
+          if (result.missingCount === 0) this.updateProfileProgress(null);
+          this.events.emit("profile-form:saved", { changed: result.changed || [], missingCount: result.missingCount ?? null });
+        } catch (error) {
+          const fields = error?.fields && typeof error.fields === "object" ? error.fields : null;
+          let shownInline = false;
+          if (fields) {
+            for (const [key, message] of Object.entries(fields)) {
+              const wrap = bubble.querySelector(`.ai-pf-field[data-key="${CSS.escape(key)}"]`);
+              if (wrap) {
+                wrap.classList.add("has-error");
+                wrap.querySelector(".ai-pf-error").textContent = String(message);
+                shownInline = true;
+              }
+            }
+            bubble.querySelector(".ai-pf-field.has-error")?.scrollIntoView?.({ block: "center", behavior: "smooth" });
+          }
+          formError.textContent = shownInline ? "Please fix the highlighted fields." : error?.message || "I couldn't save your profile just now. Please try again.";
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save";
+        }
+      });
+      this._scrollToBottom();
+    }
+    /**
+     * Dashboard: open the assistant after the user has spent `delayMs` on the
+     * page (visible time only; waits while they type; a bubble on phones).
+     * Skipped if the chat is already open or a conversation is under way.
+     * @param {object} config { delayMs, mobile, teaser, snoozeHours }
+     * @param {{ isBlocked?: () => boolean, onOpen?: (how: 'panel'|'teaser') => void }} [hooks]
+     */
+    scheduleAutoOpen(config, { isBlocked, onOpen } = {}) {
+      if (typeof window === "undefined") return false;
+      this._autoOpenController?.stop();
+      this._autoOpenController = new AutoOpenController({
+        config: { ...config, enabled: true, excludedPaths: [] },
+        win: window,
+        isOpen: () => this.isOpen,
+        // The widget's own welcome does not count as a conversation.
+        hasConversation: () => this.messages.some((m) => m.role === "user"),
+        openPanel: () => {
+          if (isBlocked?.()) return;
+          this.open({ focus: false, source: "auto" });
+          onOpen?.("panel");
+        },
+        showTeaser: (text) => {
+          if (isBlocked?.()) return;
+          this._showTeaser(text);
+          onOpen?.("teaser");
+        }
+      });
+      return this._autoOpenController.start();
+    }
+    /** Dashboard: the signed-in user's role, used to pick role-specific follow-ups. */
+    setUserRole(role) {
+      this._userRole = ["candidate", "client", "consultancy"].includes(role) ? role : null;
+      if (this.options?.surface === "app" && this.attachBtn && this.fileInput) {
+        this.attachBtn.disabled = false;
+        this.fileInput.multiple = this._userRole === "consultancy";
+        this.fileInput.accept = ".pdf,.docx,.txt";
+        this.attachBtn.title = {
+          candidate: "Upload your resume (PDF, DOCX, TXT)",
+          client: "Upload a job description (PDF, DOCX, TXT)",
+          consultancy: "Upload candidate resumes, one or several (PDF, DOCX, TXT)"
+        }[this._userRole] || "Upload a document";
+        this.attachBtn.setAttribute("aria-label", this.attachBtn.title);
+      }
+    }
+    /** A short assistant message from the widget itself (not sent to the server). */
+    postAssistantNote(text) {
+      if (!text || !this.messagesList) return;
+      this._renderMessageBubble("assistant", text, true);
+      this.messages.push({ role: "assistant", content: text, local: true });
+      this._persistState();
+    }
+    _showTeaser(text) {
+      if (this.isOpen || !this.container) return;
+      this._hideTeaser();
+      const teaser = document.createElement("div");
+      teaser.className = "ai-teaser";
+      teaser.setAttribute("role", "status");
+      teaser.setAttribute("aria-live", "polite");
+      teaser.innerHTML = `
+      <button type="button" class="ai-teaser-text">${escapeHtml(text)}</button>
+      <button type="button" class="ai-teaser-close" aria-label="Dismiss greeting">${ICONS.launcherClose}</button>
+    `;
+      teaser.querySelector(".ai-teaser-text").addEventListener("click", () => {
+        this.open({ source: "teaser" });
+      });
+      teaser.querySelector(".ai-teaser-close").addEventListener("click", () => {
+        this._hideTeaser();
+        this._autoOpenController?.snooze();
+        this.events.emit("teaser:dismissed");
+      });
+      this.container.appendChild(teaser);
+      this._teaser = teaser;
+      this.events.emit("teaser:shown");
+    }
+    _hideTeaser() {
+      if (this._teaser?.parentNode) this._teaser.parentNode.removeChild(this._teaser);
+      this._teaser = null;
     }
     toggle() {
       if (this.isOpen) {
@@ -2991,7 +4037,7 @@ var AssistantSDKBundle = (() => {
       const welcome = this.panel?.querySelector(".ai-welcome-box");
       const greetingElement = welcome?.querySelector(".ai-welcome-greeting");
       if (!welcome || !greetingElement) return;
-      greetingElement.textContent = greeting;
+      greetingElement.innerHTML = parseMarkdown(String(greeting || ""));
       this.options.greeting = greeting;
       this.options.suggestedPrompts = suggestedPrompts;
       let promptSection = welcome.querySelector(".ai-suggested-prompts");
@@ -3242,6 +4288,11 @@ var AssistantSDKBundle = (() => {
           detailsHtml = `<div class="ai-action-details">${paramRowsHtml}</div>`;
         }
       }
+      let explanationText = String(action.explanation || "");
+      if (detailsHtml) {
+        explanationText = explanationText.split("\n").filter((line) => !/^\s*[-*]\s+\*\*/.test(line)).join("\n").replace(/\s-\s+\*\*[\s\S]*?(?=(?:Choose|Click|Press|Reply)\b|$)/, " ").replace(/\n{3,}/g, "\n\n").trim();
+      }
+      const explanationHtml = explanationText ? parseMarkdown(explanationText) : "";
       const titleText = action.formattedReview?.title || action.title || "Review Action";
       const confirmBtnLabel = action.formattedReview?.type === "job_creation" ? "Confirm &amp; Create" : isHirePoolAccountAction ? accountButtonLabel : "Confirm &amp; Execute";
       card.innerHTML = `
@@ -3250,7 +4301,7 @@ var AssistantSDKBundle = (() => {
         <span class="ai-action-risk risk-${risk}">${risk === "destructive" ? "Destructive" : risk === "read" ? "Read" : "Write"}</span>
         <span class="ai-action-title">${escapeHtml(titleText)}</span>
       </div>
-      ${action.explanation ? `<p class="ai-action-explanation">${escapeHtml(action.explanation)}</p>` : ""}
+      ${explanationHtml ? `<div class="ai-action-explanation">${explanationHtml}</div>` : ""}
       ${detailsHtml}
       ${requiresAcknowledgement ? `
         <label class="ai-action-acknowledgement">
@@ -3286,6 +4337,27 @@ var AssistantSDKBundle = (() => {
       }
       if (btnEdit) {
         btnEdit.addEventListener("click", () => {
+          const body = action.parameters?.body || action.arguments?.body || null;
+          if (/profile_update$/.test(String(action.formattedReview?.type || "")) && this._profileFormHandlers) {
+            btnCancel.click();
+            statusMsg.textContent = "Editing in the form below.";
+            action._statusMessage = "Editing in the form below.";
+            void this.showProfileForm("all", { overrides: body && typeof body === "object" ? body : null });
+            return;
+          }
+          if (body && typeof body === "object" && (body.first_name || body.email)) {
+            const parts = [
+              `Name: ${[body.first_name, body.last_name].filter(Boolean).join(" ")}`,
+              `Email: ${body.email || ""}`,
+              `Job title: ${body.job_title || ""}`,
+              `Location: ${body.current_location || ""}`,
+              `Experience: ${body.years_of_experience ?? body.experience_years ?? 0} years`,
+              `Skills: ${Array.isArray(body.skills) ? body.skills.join(", ") : ""}`
+            ];
+            if (body.phone) parts.splice(2, 0, `Phone: ${body.phone}`);
+            this.textarea.value = parts.join(", ");
+            this.textarea.dispatchEvent(new Event("input"));
+          }
           this.textarea.focus();
           this.textarea.placeholder = "Type changes to profile, job, or candidate details...";
           this._scrollToBottom();
@@ -3397,6 +4469,11 @@ var AssistantSDKBundle = (() => {
       this._scrollToBottom();
     }
     _isHirePoolResumeEnabled() {
+      if (this.options?.surface === "website" || this.options?.surface === "app") return false;
+      return this._canSaveHirePoolResume();
+    }
+    /** Can this widget save a PDF to the signed-in candidate's HirePool profile? */
+    _canSaveHirePoolResume() {
       return this.options.assistantId === "hirepool" && this.options.applicationId === "hirepool-local-app" && typeof this.apiClient.prepareHirePoolResume === "function";
     }
     setHostIdentity(identity, sessionScope = null) {
@@ -3735,6 +4812,52 @@ var AssistantSDKBundle = (() => {
       };
       await runSmokeTest();
     }
+    /**
+     * Website bot: after signup, share the HirePool app link, then thank the visitor.
+     * No assistant login is created on the public website.
+     */
+    _displaySignupHandoff(handoff = {}) {
+      let appUrl = null;
+      try {
+        const parsed = new URL(handoff.url);
+        if (parsed.protocol === "https:" || parsed.protocol === "http:") appUrl = parsed.href;
+      } catch {
+      }
+      this.storage.clearSignupProgress?.();
+      const roleLabel = {
+        candidate: "candidate",
+        client: "company",
+        consultancy: "agency"
+      }[handoff.role] || "";
+      const destination = handoff.role === "candidate" ? "profile" : "dashboard";
+      const linkLine = appUrl ? `\u{1F449} **[Open my HirePool ${destination}](${appUrl})**` : "\u{1F449} **Continue to your HirePool dashboard** by logging in at HirePool.";
+      const linkMsg = `\u{1F389} Your HirePool ${roleLabel ? `${roleLabel} ` : ""}account is ready!
+
+${linkLine}
+
+If HirePool asks you to log in, use the email and password you just set up.`;
+      const thanksMsg = "Thank you for joining HirePool! \u{1F49A} We are excited to have you on board. If you have any other questions about HirePool, I am right here.";
+      for (const content of [linkMsg, thanksMsg]) {
+        this._renderMessageBubble("assistant", content);
+        this.messages.push({ role: "assistant", content });
+      }
+      if (appUrl) {
+        const row = document.createElement("div");
+        row.className = "ai-message-row assistant";
+        const btn = document.createElement("button");
+        btn.type = "button";
+        btn.className = "ai-btn-action-confirm ai-handoff-btn";
+        btn.textContent = handoff.role === "candidate" ? "Go to my profile" : "Go to my dashboard";
+        btn.addEventListener("click", () => {
+          window.open(appUrl, "_blank", "noopener,noreferrer");
+        });
+        row.appendChild(btn);
+        this.messagesList.appendChild(row);
+      }
+      this._persistState();
+      this._scrollToBottom();
+      this.events.emit("signup:completed", { role: handoff.role || null, appUrl });
+    }
     _displaySignupConfirmation(sessionData) {
       const role = sessionData.role || sessionData.identity?.userType;
       let greeting = "Welcome to HirePool!";
@@ -3847,6 +4970,8 @@ var AssistantSDKBundle = (() => {
       this.messages.push({ role: "user", content: uploadMessage });
       this._renderMessageBubble("user", uploadMessage);
       this._persistState();
+      const cardRow = bubble.closest(".ai-message-row");
+      if (cardRow && this.messagesList) this.messagesList.appendChild(cardRow);
       bubble.innerHTML = `
       <div class="ai-processing-state">
         <span class="ai-spinner"></span>
@@ -3901,7 +5026,7 @@ var AssistantSDKBundle = (() => {
         return;
       }
       this.apiClient.uploadDocument(file, this.activeConversationId, {
-        assistantId: this.config?.assistantId,
+        assistantId: this.options?.assistantId || this.apiClient?.assistantId,
         consentAccepted: true,
         signal: controller.signal
       }).then(async (data) => {
@@ -3950,6 +5075,18 @@ var AssistantSDKBundle = (() => {
           this._scrollToBottom();
         });
         this.events.emit("document:uploaded", doc);
+        if (this.options?.surface === "app" && data.insight) {
+          const hint = bubble.querySelector(".ai-doc-hint");
+          if (hint) hint.textContent = "Ask me anything about this document. It is only used in this conversation.";
+          this._showDashboardDocumentInsight(data.insight, file);
+        } else if (data.insight?.text) {
+          if (data.insight.signupRole) this._visitorSignupRole = data.insight.signupRole;
+          const hint = bubble.querySelector(".ai-doc-hint");
+          if (hint) hint.textContent = "Ask me anything about this document. It is only used in this conversation.";
+          this._postLocalAssistantMessage(data.insight.text, Array.isArray(data.insight.quickReplies) ? data.insight.quickReplies : []);
+          this._idleNudge?.onAssistantMessage("question");
+          this.events.emit("document:insight", { kind: data.insight.kind });
+        }
         this._scrollToBottom();
       }).catch((error) => {
         if (error.name === "AbortError") return;
@@ -3959,6 +5096,280 @@ var AssistantSDKBundle = (() => {
         controller.signal.removeEventListener("abort", showCancelled);
         if (this.documentUploadController === controller) this.documentUploadController = null;
       });
+    }
+    /**
+     * Dashboard: show what an uploaded document is and the next steps for this role.
+     * Nothing is saved until the user confirms in a form or a review card.
+     */
+    _showDashboardDocumentInsight(insight, file) {
+      if (!insight?.text) return;
+      const data = insight.data || {};
+      const handlers = {
+        fill_profile: () => void this.showProfileForm("all", {
+          overrides: data.prefill || {},
+          fillEmptyOnly: true,
+          sourceLabel: "From resume"
+        }),
+        find_jobs: () => {
+          const q = data.jobSearch;
+          void this.sendMessage(q?.query ? `Find ${q.query} jobs${q.location ? ` in ${q.location}` : ""}` : "Find matching jobs");
+        },
+        save_resume: () => {
+          if (file && this._canSaveHirePoolResume() && String(file.name || "").toLowerCase().endsWith(".pdf")) {
+            try {
+              this.hirePoolResume.selectFile(file, this.activeConversationId);
+            } catch (error) {
+              this._renderHirePoolResumeError(error.message);
+            }
+          } else {
+            this.postAssistantNote("Saving a resume works with **PDF** files here. You can also upload it from your **Profile** page.");
+          }
+        },
+        create_job: () => {
+          if (data.message) void this.sendMessage(data.message, { displayText: "Create this job from my job description" });
+        },
+        edit_job: () => {
+          if (!data.message) return;
+          this.textarea.value = data.message;
+          this.textarea.dispatchEvent(new Event("input"));
+          this.textarea.focus();
+          this.postAssistantNote("I put the job details in the message box. Change anything you like, then press **send** to see the review card.");
+        }
+      };
+      const options = (Array.isArray(insight.options) ? insight.options : []).map((option) => ({
+        icon: option.icon,
+        title: option.title,
+        subtitle: option.subtitle,
+        prompt: option.prompt || option.title,
+        onSelect: option.id === "prompt" ? null : handlers[option.id] || null
+      }));
+      this._postLocalAssistantMessage(insight.text, []);
+      if (options.length) this._renderRoleCards(this.messagesList.lastElementChild, options);
+      this._idleNudge?.onAssistantMessage("question");
+      this.events.emit("document:insight", { kind: insight.kind, surface: "app" });
+    }
+    /** Dashboard (agency): bench import and submit calls, set by the SDK. */
+    setAssistantHandlers(handlers) {
+      this._assistantHandlers = handlers && typeof handlers.addCandidate === "function" ? handlers : null;
+    }
+    /**
+     * Agency dashboard: read one or more resumes, then offer to add them to the
+     * bench, submit them to a job, or review them one by one.
+     */
+    _handleBenchFiles(files) {
+      const settings = this.options.documentUpload;
+      if (!settings?.enabled || !files.length) return;
+      const allowed = files.filter((f) => settings.allowedExtensions.includes(`.${String(f.name || "").split(".").pop().toLowerCase()}`) && Number.isFinite(f.size) && f.size > 0 && f.size <= settings.maxSizeBytes);
+      const skipped = files.length - allowed.length;
+      if (!allowed.length) {
+        this.postAssistantNote("Those files can\u2019t be read here. Upload resumes as **PDF, DOCX or TXT**, up to 10 MB each.");
+        return;
+      }
+      const consent = settings.consent;
+      const row = document.createElement("div");
+      row.className = "ai-message-row assistant";
+      const bubble = document.createElement("div");
+      bubble.className = "ai-bubble";
+      const countLabel = `${allowed.length} resume${allowed.length === 1 ? "" : "s"}`;
+      bubble.innerHTML = `
+      <section class="ai-document-consent" role="group">
+        <h3>${escapeHtml(consent.title)}</h3>
+        <p>${escapeHtml(consent.description)}</p>
+        <p class="ai-pf-hint">${escapeHtml(countLabel)} selected${skipped ? ` \xB7 ${skipped} file${skipped === 1 ? "" : "s"} skipped (unsupported or too large)` : ""}</p>
+        <label class="ai-document-consent-choice"><input type="checkbox" class="ai-document-consent-checkbox"><span>${escapeHtml(consent.checkboxLabel)}</span></label>
+        <div class="ai-document-consent-controls">
+          <button type="button" class="ai-btn-document-consent-accept" disabled>Continue</button>
+          <button type="button" class="ai-btn-document-consent-cancel">Cancel</button>
+        </div>
+      </section>`;
+      row.appendChild(bubble);
+      this.messagesList.appendChild(row);
+      this._scrollToBottom();
+      const checkbox = bubble.querySelector(".ai-document-consent-checkbox");
+      const accept = bubble.querySelector(".ai-btn-document-consent-accept");
+      checkbox.addEventListener("change", () => {
+        accept.disabled = !checkbox.checked;
+      });
+      bubble.querySelector(".ai-btn-document-consent-cancel").addEventListener("click", () => {
+        bubble.innerHTML = '<p class="ai-document-cancelled">Upload cancelled. The files were not sent.</p>';
+      });
+      accept.addEventListener("click", () => {
+        if (!checkbox.checked) return;
+        void this._readBenchFiles(allowed, row, bubble);
+      });
+    }
+    async _readBenchFiles(files, row, bubble) {
+      const label = `Uploaded ${files.length} resume${files.length === 1 ? "" : "s"}`;
+      this.messages.push({ role: "user", content: label });
+      this._renderMessageBubble("user", label);
+      this.messagesList.appendChild(row);
+      this._persistState();
+      const results = [];
+      for (let i = 0; i < files.length; i += 1) {
+        bubble.innerHTML = `<div class="ai-processing-state"><span class="ai-spinner"></span><span>Reading ${i + 1} of ${files.length}: <strong>${escapeHtml(files[i].name)}</strong>\u2026</span></div>`;
+        this._scrollToBottom();
+        try {
+          const data = await this.apiClient.uploadDocument(files[i], this.activeConversationId, {
+            assistantId: this.options?.assistantId || this.apiClient?.assistantId,
+            consentAccepted: true
+          });
+          if (data.conversationId && !this.activeConversationId) {
+            this.activeConversationId = data.conversationId;
+            this._persistState();
+          }
+          const insight = data.insight || {};
+          if (insight.kind === "resume" && insight.data?.candidate) {
+            results.push({ filename: files[i].name, ...insight.data, status: insight.data.missing?.length ? "needs_details" : "ready" });
+          } else {
+            results.push({ filename: files[i].name, status: "not_resume", note: insight.kind === "unreadable" ? "No readable text" : "Not a resume" });
+          }
+        } catch (error) {
+          results.push({ filename: files[i].name, status: "unreadable", note: error?.message || "Could not be read" });
+        }
+      }
+      this._renderBenchCard(bubble, results);
+    }
+    _renderBenchCard(bubble, results) {
+      const nameOf = (r) => [r.candidate?.first_name, r.candidate?.last_name].filter(Boolean).join(" ") || r.filename;
+      const chip = (r) => ({
+        ready: '<span class="ai-bench-chip ok">Ready</span>',
+        needs_details: `<span class="ai-bench-chip warn">Missing: ${escapeHtml((r.missing || []).join(", "))}</span>`,
+        adding: '<span class="ai-bench-chip">Adding\u2026</span>',
+        added: '<span class="ai-bench-chip ok">Added \u2713</span>',
+        duplicate: '<span class="ai-bench-chip">Already on bench</span>',
+        failed: `<span class="ai-bench-chip err">${escapeHtml(r.note || "Not added")}</span>`,
+        not_resume: `<span class="ai-bench-chip warn">${escapeHtml(r.note || "Not a resume")}</span>`,
+        unreadable: `<span class="ai-bench-chip err">${escapeHtml(r.note || "Could not be read")}</span>`
+      })[r.status] || "";
+      const resumes = results.filter((r) => r.candidate);
+      const ready = () => results.filter((r) => r.status === "ready");
+      const render = () => {
+        const added = results.filter((r) => r.status === "added").length;
+        const dup = results.filter((r) => r.status === "duplicate").length;
+        const needs = results.filter((r) => r.status === "needs_details").length;
+        bubble.innerHTML = `
+        <div class="ai-bench-card">
+          <div class="ai-pf-title">${resumes.length} resume${resumes.length === 1 ? "" : "s"} read</div>
+          <div class="ai-bench-list">
+            ${results.map((r, i) => `
+              <div class="ai-bench-row" data-index="${i}">
+                <div class="ai-bench-who"><strong>${escapeHtml(nameOf(r))}</strong>
+                  <span>${escapeHtml([r.candidate?.job_title, r.candidate?.current_location, r.candidate?.email].filter(Boolean).join(" \xB7 ") || r.filename)}</span></div>
+                ${chip(r)}
+              </div>`).join("")}
+          </div>
+          ${added || dup ? `<div class="ai-pf-hint">${added} added${dup ? ` \xB7 ${dup} already on your bench` : ""}${needs ? ` \xB7 ${needs} need details (use Review one by one)` : ""}</div>` : ""}
+          <div class="ai-bench-actions">
+            ${ready().length ? `<button type="button" class="ai-btn-action-confirm" data-act="add">Add ${ready().length} to my bench</button>` : ""}
+            ${resumes.length ? '<button type="button" class="ai-btn-action-cancel" data-act="submit">Submit to a job</button>' : ""}
+            ${resumes.some((r) => r.status === "ready" || r.status === "needs_details") ? '<button type="button" class="ai-btn-action-cancel" data-act="review">Review one by one</button>' : ""}
+          </div>
+          <div class="ai-bench-review"></div>
+        </div>`;
+        bubble.querySelector('[data-act="add"]')?.addEventListener("click", () => void addAll());
+        bubble.querySelector('[data-act="submit"]')?.addEventListener("click", () => void submitFlow());
+        bubble.querySelector('[data-act="review"]')?.addEventListener("click", () => {
+          const box = bubble.querySelector(".ai-bench-review");
+          box.innerHTML = "";
+          results.filter((r) => r.candidate && r.addMessage && (r.status === "ready" || r.status === "needs_details")).forEach((r) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "ai-pf-chat-btn";
+            button.textContent = `Review ${nameOf(r)}`;
+            button.addEventListener("click", () => {
+              void this.sendMessage(r.addMessage, { displayText: `Review ${nameOf(r)}` });
+            });
+            box.appendChild(button);
+          });
+          this._scrollToBottom();
+        });
+        this._scrollToBottom();
+      };
+      const addAll = async () => {
+        for (const r of ready()) {
+          r.status = "adding";
+          render();
+          try {
+            const res = await this._assistantHandlers.addCandidate(r.candidate);
+            if (res?.status === "added") {
+              r.status = "added";
+              r.id = res.id;
+            } else if (res?.status === "duplicate") r.status = "duplicate";
+            else if (res?.status === "needs_details") {
+              r.status = "needs_details";
+              r.missing = res.missing?.length ? res.missing : r.missing;
+            } else {
+              r.status = "failed";
+              r.note = res?.message;
+            }
+          } catch (error) {
+            r.status = "failed";
+            r.note = error?.message;
+          }
+        }
+        render();
+        this.events.emit("bench:import", { added: results.filter((r) => r.status === "added").length });
+      };
+      const submitFlow = async () => {
+        if (ready().length) await addAll();
+        const submittable = results.filter((r) => r.status === "added" && r.id);
+        const box = bubble.querySelector(".ai-bench-review");
+        if (!submittable.length) {
+          box.innerHTML = '<p class="ai-pf-hint">Only candidates added just now can be submitted here. For candidates already on your bench, say <strong>submit &lt;name&gt; to &lt;job&gt;</strong>.</p>';
+          return;
+        }
+        box.innerHTML = '<div class="ai-profile-form-loading">Loading open jobs\u2026</div>';
+        let jobs = [];
+        try {
+          jobs = await this._assistantHandlers.listJobs();
+        } catch (error) {
+          box.innerHTML = `<p class="ai-profile-form-error">${escapeHtml(error?.message || "I couldn't load open jobs just now.")}</p>`;
+          return;
+        }
+        if (!jobs.length) {
+          box.innerHTML = '<p class="ai-pf-hint">There are no open jobs to submit to right now.</p>';
+          return;
+        }
+        box.innerHTML = `
+        <form class="ai-profile-form ai-bench-submit">
+          <label class="ai-pf-label" for="ai-bench-job">Job</label>
+          <select id="ai-bench-job" class="ai-form-input"><option value="">Choose a job\u2026</option>
+            ${jobs.map((j) => `<option value="${escapeHtml(j.id)}">${escapeHtml([j.title, j.company, j.location].filter(Boolean).join(" \xB7 "))}</option>`).join("")}
+          </select>
+          <div class="ai-pf-label">Candidates</div>
+          <div class="ai-pf-chips">
+            ${submittable.map((r) => `<label class="ai-pf-chip"><input type="checkbox" value="${escapeHtml(r.id)}" checked><span>${escapeHtml(nameOf(r))}</span></label>`).join("")}
+          </div>
+          <div class="ai-pf-form-error" role="alert"></div>
+          <div class="ai-pf-actions"><button type="submit" class="ai-btn-action-confirm">Submit</button></div>
+        </form>`;
+        const form = box.querySelector("form");
+        form.addEventListener("submit", async (event) => {
+          event.preventDefault();
+          const jobId = form.querySelector("#ai-bench-job").value;
+          const ids = [...form.querySelectorAll('input[type="checkbox"]:checked')].map((i) => i.value);
+          const error = form.querySelector(".ai-pf-form-error");
+          if (!jobId || !ids.length) {
+            error.textContent = "Choose a job and at least one candidate.";
+            return;
+          }
+          const button = form.querySelector('button[type="submit"]');
+          button.disabled = true;
+          button.textContent = "Submitting\u2026";
+          try {
+            await this._assistantHandlers.submit(jobId, ids);
+            const job = jobs.find((j) => j.id === jobId);
+            box.innerHTML = "";
+            this.postAssistantNote(`\u2705 Submitted **${ids.length}** candidate${ids.length === 1 ? "" : "s"} to **${job?.title || "the job"}**. Say **show my submissions** to track them.`);
+          } catch (err) {
+            error.textContent = err?.message || "HirePool couldn't submit these candidates. Please try again.";
+            button.disabled = false;
+            button.textContent = "Submit";
+          }
+        });
+        this._scrollToBottom();
+      };
+      render();
     }
     cancelDocumentUpload() {
       this.documentUploadController?.abort();
@@ -3981,14 +5392,6 @@ var AssistantSDKBundle = (() => {
           this._renderActionCard(bubble, detectedAction);
         }
         row.appendChild(bubble);
-        const actions = document.createElement("div");
-        actions.className = "ai-message-actions";
-        actions.innerHTML = `
-        <button class="ai-msg-action-btn" type="button" aria-label="Copy response">
-          ${ICONS.copy} Copy
-        </button>
-      `;
-        row.appendChild(actions);
       }
       this.messagesList.appendChild(row);
       this._scrollToBottom();
@@ -4030,16 +5433,53 @@ var AssistantSDKBundle = (() => {
         this._recoverableBanner = null;
       }
     }
-    _renderErrorBanner(message, retryCallback = null) {
+    /**
+     * Friendly error notice. Only one is shown at a time.
+     * @param {string} message plain, user-facing text
+     * @param {Function|null} retryCallback what "Try again" does (null hides the button)
+     * @param {{ retryLabel?: string|null, retryAfterMs?: number, loginUrl?: string|null }} [options]
+     */
+    _renderErrorBanner(message, retryCallback = null, options = {}) {
+      this.messagesList?.querySelectorAll(".ai-error-banner").forEach((el) => el.remove());
       this._lastErrorRetryCallback = typeof retryCallback === "function" ? retryCallback : null;
+      const retryLabel = options.retryLabel === void 0 ? "Try again" : options.retryLabel;
       const banner = document.createElement("div");
       banner.className = "ai-error-banner";
+      banner.setAttribute("role", "alert");
+      const showRetry = Boolean(retryLabel) && (this._lastErrorRetryCallback || options.retryLabel === void 0);
+      let loginUrl = null;
+      try {
+        const parsed = options.loginUrl ? new URL(options.loginUrl) : null;
+        if (parsed && (parsed.protocol === "http:" || parsed.protocol === "https:")) loginUrl = parsed.href;
+      } catch {
+      }
+      const looksTechnical = /\bHTTP\s*\d{3}\b|failed to fetch|networkerror|load failed|\bstream(?:ing)?\b.*\b(?:ended|event|response)\b|typeerror|referenceerror|syntaxerror|\bundefined\b|\bnull\b|ECONN|ETIMEDOUT|ENOTFOUND|stack trace|internal server error|\[object /i.test(String(message || ""));
+      const safeMessage = !message || looksTechnical ? "Something went wrong on my side and I couldn't finish that. Nothing was changed. Please try again." : message;
       banner.innerHTML = `
-      <span>${escapeHtml(message || "An error occurred. Please try again.")}</span>
-      <button class="ai-error-retry-btn" type="button">Retry</button>
+      <span>${escapeHtml(safeMessage)}</span>
+      ${showRetry ? `<button class="ai-error-retry-btn" type="button">${escapeHtml(retryLabel)}</button>` : ""}
+      ${loginUrl ? `<a class="ai-error-login-link" href="${escapeHtml(loginUrl)}" target="_top">Log in</a>` : ""}
     `;
+      const retryBtn = banner.querySelector(".ai-error-retry-btn");
+      if (retryBtn && Number(options.retryAfterMs) > 0) {
+        retryBtn.disabled = true;
+        setTimeout(() => {
+          retryBtn.disabled = false;
+        }, Number(options.retryAfterMs));
+      }
       this.messagesList.appendChild(banner);
       this._scrollToBottom();
+    }
+    /** Offline: resend once the browser reports the connection is back. */
+    _resendWhenOnline(resend) {
+      if (this._onlineHandler) window.removeEventListener("online", this._onlineHandler);
+      this._onlineHandler = () => {
+        window.removeEventListener("online", this._onlineHandler);
+        this._onlineHandler = null;
+        this.messagesList?.querySelectorAll(".ai-error-banner").forEach((el) => el.remove());
+        void resend();
+      };
+      window.addEventListener("online", this._onlineHandler);
     }
     displayHirePoolLoginNotice(message) {
       this._renderMessageBubble("assistant", message, false, {
@@ -4059,6 +5499,26 @@ var AssistantSDKBundle = (() => {
       card.setAttribute("data-action-id", actionId);
       card.setAttribute("data-action-type", "hirepool_login");
       this.events.emit("action:proposed", action);
+      if (this._isLoginRedirectMode()) {
+        const loginUrl = this._getAppLoginUrl();
+        card.innerHTML = `
+        <div class="ai-action-header">
+          <span class="ai-action-badge">HirePool account</span>
+          <span class="ai-action-title">Log in to your HirePool dashboard</span>
+        </div>
+        <div class="ai-action-explanation">Your profile, jobs, and applications are in the HirePool app. The assistant there can help with your account.</div>
+        <div class="ai-action-controls">
+          <button type="button" class="ai-btn-action-confirm ai-login-redirect-btn">Go to HirePool login</button>
+        </div>
+      `;
+        card.querySelector(".ai-login-redirect-btn").addEventListener("click", () => {
+          if (loginUrl) window.open(loginUrl, "_blank", "noopener,noreferrer");
+          this.events.emit("login:redirect", { url: loginUrl });
+        });
+        bubble.appendChild(card);
+        this._scrollToBottom();
+        return;
+      }
       if (action._status && action._status !== "pending") {
         card.innerHTML = `
         <div class="ai-action-header">
@@ -4221,7 +5681,9 @@ var AssistantSDKBundle = (() => {
       if (!this._isGuestSession()) return false;
       const isLoginTrigger = /^\s*(?:log\s*in(?:\s+to\s+hirepool)?|sign\s*in(?:\s+to\s+hirepool)?|i\s+(?:want|would\s+like|'d\s+like)\s+to\s+(?:log\s*in|sign\s*in))\s*[.!?]*\s*$/i.test(trimmed);
       if (isLoginTrigger) {
-        this.displayHirePoolLoginNotice("Please enter your HirePool email and password below to sign in.");
+        this.displayHirePoolLoginNotice(
+          this._isLoginRedirectMode() ? "You can log in to your HirePool dashboard using the button below. Once you are signed in, the assistant there can help with your profile, jobs, and applications." : "Please enter your HirePool email and password below to sign in."
+        );
         return true;
       }
       return false;
@@ -4254,9 +5716,34 @@ var AssistantSDKBundle = (() => {
       return true;
     }
     _isHirePoolSignupEnabled() {
+      if (this.options?.behavior?.signupEnabled === false) return false;
       return Boolean(
         (!this.options?.assistantId || this.options.assistantId === "hirepool") && typeof this.apiClient?.getSignupAgreement === "function"
       );
+    }
+    _isLoginRedirectMode() {
+      return this.options?.behavior?.loginMode === "redirect";
+    }
+    /** Website "Sign in": go to the HirePool app's login page (local only for now). */
+    _goToLogin() {
+      const url = this._getAppLoginUrl() || "http://localhost:5173/login";
+      this.events.emit("login:redirect", { url });
+      if (typeof window !== "undefined" && window.location) {
+        window.location.assign(url);
+      }
+    }
+    /** Website: the account bar folds into header buttons once the visitor has written. */
+    _syncWebsiteChatState() {
+      if (!this.container || this.options?.surface !== "website") return;
+      this.container.classList.toggle("ai-has-chat", this.messages.some((m) => m.role === "user"));
+    }
+    _getAppLoginUrl() {
+      try {
+        const url = new URL(this.options?.behavior?.appLoginUrl);
+        return url.protocol === "https:" || url.protocol === "http:" ? url.href : null;
+      } catch {
+        return null;
+      }
     }
     _buildChatContextPayload(rawContext) {
       let baseContext = typeof rawContext === "string" && rawContext.trim().length > 0 ? rawContext.trim() : "";
@@ -4286,10 +5773,26 @@ ${tag}` : tag;
         this._renderErrorBanner(error?.message || "Unable to start HirePool signup.");
       }
     }
+    /**
+     * Remember which account type a guest described ("I'm a staffing agency",
+     * "I'm looking for a job"). Only short, role-like messages count, so a long
+     * question that happens to mention a company does not change it.
+     */
+    _rememberVisitorRole(text) {
+      const value = String(text || "").trim();
+      if (!value || value.split(/\s+/).length > 8) return;
+      if (/^\s*(?:i'?m|i\s+am)\s+looking\s+for\s+(?:a\s+)?(?:new\s+)?(?:job|work|role)\b|^\s*find\s+(?:me\s+)?(?:a\s+)?job\b/i.test(value)) {
+        this._visitorSignupRole = "candidate";
+        return;
+      }
+      const parsed = parseHirePoolRoleChoice(value);
+      if (parsed) this._visitorSignupRole = parsed === "staffing" ? "consultancy" : parsed;
+    }
     async _handleHirePoolSignupConversation(trimmed) {
       if (!this._isGuestSession() || !this._isHirePoolSignupEnabled()) {
         return false;
       }
+      this._rememberVisitorRole(trimmed);
       const signupState = this.hirePoolSignup.state;
       const inActiveSignup = ![
         HIREPOOL_SIGNUP_STATES.IDLE,
@@ -4365,6 +5868,13 @@ ${tag}` : tag;
         }
       }
       const isGeneralSignupTrigger = /^\s*(?:(?:sign\s*up|signup|register|create\s+(?:an?\s+)?account)\s*(?:for\s+hirepool)?|i\s+(?:want|would\s+like|'d\s+like)\s+to\s+(?:sign\s*up|signup|register|join(?:\s+hirepool)?))\s*[.!?]*\s*$/i.test(trimmed);
+      if (isGeneralSignupTrigger && this._visitorSignupRole) {
+        const role = this._visitorSignupRole;
+        const label = ROLE_DEFINITIONS[role]?.label || role;
+        this._appendAssistantSignupNotice(`Great! Let's create your **${label}** account right here in chat.`);
+        await this._startHirePoolSignup(role);
+        return true;
+      }
       if (isGeneralSignupTrigger) {
         this._appendAssistantSignupNotice(
           "Let\u2019s get your HirePool account set up! Choose your account type below, or reply with **Candidate**, **Employer / Company**, or **Agency / Consultancy**."
@@ -4386,9 +5896,10 @@ ${tag}` : tag;
         throw new Error("Document context is no longer available for this conversation. Start a new conversation and upload the document again.");
       }
     }
-    async sendMessage(text, { displayUserMessage = true } = {}) {
+    async sendMessage(text, { displayUserMessage = true, displayText = null } = {}) {
       const trimmed = (text || "").trim();
       if (!trimmed || this.isGenerating) return;
+      const shown = typeof displayText === "string" && displayText.trim() ? displayText.trim() : trimmed;
       try {
         await this._assertDocumentContextAvailable();
       } catch (error) {
@@ -4399,8 +5910,8 @@ ${tag}` : tag;
       this.textarea.value = "";
       this.textarea.style.height = "auto";
       if (displayUserMessage) {
-        this.messages.push({ role: "user", content: trimmed });
-        this._renderMessageBubble("user", trimmed);
+        this.messages.push({ role: "user", content: shown });
+        this._renderMessageBubble("user", shown);
         this._persistState();
       }
       this.events.emit("message:sent", {
@@ -4416,6 +5927,13 @@ ${tag}` : tag;
       if (this._handleHirePoolLoginTrigger(trimmed)) {
         if (this.sendBtn) this.sendBtn.disabled = false;
         return;
+      }
+      if (this._profileFormHandlers && this.options?.surface === "app") {
+        const formMode = /^\s*(?:please\s+)?(?:complete|finish|fill\s*(?:in|up)?)\s+(?:my\s+|the\s+)?profile\s*[.!]*\s*$/i.test(trimmed) ? "missing" : /^\s*(?:please\s+)?(?:edit|update|change)\s+(?:my\s+|the\s+)?profile(?:\s+details)?\s*[.!]*\s*$/i.test(trimmed) ? "all" : null;
+        if (formMode) {
+          await this.showProfileForm(formMode);
+          return;
+        }
       }
       this._setGenerating(true);
       this.abortController = new AbortController();
@@ -4436,10 +5954,45 @@ ${tag}` : tag;
             await sendAttempt(true);
             return;
           }
-          if (err?.name !== "AbortError") {
-            this._renderErrorBanner(err.message);
-            this.events.emit("error", err);
+          if (err?.name === "AbortError") return;
+          console.warn("[AI Assistant] Request failed:", err);
+          this.events.emit("error", err);
+          const hadPartialReply = Boolean(accumulatedText && accumulatedText.trim());
+          if (!hadPartialReply && assistantBubbleRow && assistantBubbleRow.parentNode) {
+            assistantBubbleRow.parentNode.removeChild(assistantBubbleRow);
           }
+          this.streamingIndicator.style.display = "none";
+          const info = describeAssistantError(err, {
+            surface: this.options?.surface || null,
+            online: typeof navigator !== "undefined" ? navigator.onLine : true,
+            hadPartialReply
+          });
+          if (!isRetry && info.recover === "new-conversation") {
+            this.activeConversationId = null;
+            this.storage.clearConversationId();
+            await sendAttempt(true);
+            return;
+          }
+          if (!isRetry && info.recover === "reauthenticate") {
+            this.events.emit("auth:refresh-needed");
+            await sendAttempt(true);
+            return;
+          }
+          const resend = () => this.sendMessage(trimmed, { displayUserMessage: false });
+          if (info.recover === "wait-online" && typeof window !== "undefined") {
+            this._renderErrorBanner(info.message, null, { retryLabel: null });
+            this._resendWhenOnline(resend);
+            return;
+          }
+          if (info.kind === "signed-out") {
+            this._renderErrorBanner(info.message, null, { retryLabel: null, loginUrl: this._getAppLoginUrl() || "http://localhost:5173/login" });
+            return;
+          }
+          this._renderErrorBanner(
+            info.message,
+            info.retry === "none" ? null : resend,
+            { retryLabel: info.retry === "none" ? null : "Try again", retryAfterMs: info.retryAfterMs }
+          );
         };
         try {
           const rawContext = this.options.integration && !this.contextOverrideSet ? await this.options.integration.getContext() : this.options.context;
@@ -4449,7 +6002,7 @@ ${tag}` : tag;
             message: trimmed,
             context: contextPayload,
             conversationId: typeof this.activeConversationId === "string" && this.activeConversationId.trim().length > 0 ? this.activeConversationId.trim() : void 0,
-            history: (displayUserMessage ? this.messages.slice(0, -1) : this.messages).slice(-25),
+            history: (displayUserMessage ? this.messages.slice(0, -1) : this.messages).filter((m) => !m.local).slice(-25),
             stream,
             signal: this.abortController.signal,
             onStart: (event) => {
@@ -4501,14 +6054,6 @@ ${tag}` : tag;
                 if (detectedAction) {
                   this._renderActionCard(assistantBubbleContent, detectedAction);
                 }
-                const actions = document.createElement("div");
-                actions.className = "ai-message-actions";
-                actions.innerHTML = `
-                <button class="ai-msg-action-btn" type="button" aria-label="Copy response">
-                  ${ICONS.copy} Copy
-                </button>
-              `;
-                assistantBubbleRow.appendChild(actions);
               }
               this.messages.push({ role: "assistant", content: finalText, action: detectedAction || void 0 });
               this._persistState();
@@ -4968,8 +6513,9 @@ ${tag}` : tag;
       if (conversationId) {
         formData.append("conversationId", conversationId);
       }
-      if (options.assistantId) {
-        formData.append("assistantId", options.assistantId);
+      const uploadAssistantId = options.assistantId || this.assistantId;
+      if (uploadAssistantId) {
+        formData.append("assistantId", uploadAssistantId);
       }
       const res = await fetch(url, {
         method: "POST",
@@ -5620,1453 +7166,2482 @@ ${tag}` : tag;
   };
 
   // widget/src/styles.css
-  var styles_default = `:host {
-  all: initial;
-  display: block;
-  font-family: var(--font-sans), 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-  font-size: 14px;
-  line-height: 1.5;
-  color: #1f2937;
-  z-index: 2147483640;
-}
+  var styles_default = `:host {\r
+  all: initial;\r
+  display: block;\r
+  font-family: var(--font-sans), 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;\r
+  font-size: 14px;\r
+  line-height: 1.5;\r
+  color: #1f2937;\r
+  z-index: 2147483640;\r
+}\r
+\r
+*, *::before, *::after {\r
+  box-sizing: border-box;\r
+}\r
+\r
+.ai-widget-container {\r
+  --ai-primary: #a3e635;\r
+  --ai-primary-hover: #8ee055;\r
+  --ai-primary-contrast: #030712;\r
+  --ai-bg: #ffffff;\r
+  --ai-surface: #f8fafc;\r
+  --ai-surface-alt: #f1f5f9;\r
+  --ai-border: #e2e8f0;\r
+  --ai-text: #090d16;\r
+  --ai-text-muted: #64748b;\r
+  --ai-user-bubble: #a3e635;\r
+  --ai-user-text: #030712;\r
+  --ai-bot-bubble: #f1f5f9;\r
+  --ai-bot-text: #090d16;\r
+  --ai-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);\r
+  --ai-radius: 16px;\r
+  --ai-radius-sm: 8px;\r
+\r
+  position: fixed;\r
+  z-index: 2147483647;\r
+  pointer-events: none;\r
+}\r
+\r
+/* Dark Theme overrides */\r
+.ai-widget-container[data-theme="dark"] {\r
+  --ai-bg: #030712;\r
+  --ai-surface: #090d16;\r
+  --ai-surface-alt: #0f172a;\r
+  --ai-border: #1e293b;\r
+  --ai-text: #f8fafc;\r
+  --ai-text-muted: #94a3b8;\r
+  --ai-user-bubble: #a3e635;\r
+  --ai-user-text: #030712;\r
+  --ai-bot-bubble: #0f172a;\r
+  --ai-bot-text: #f8fafc;\r
+  --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);\r
+}\r
+\r
+/* Auto Theme Media Query */\r
+@media (prefers-color-scheme: dark) {\r
+  .ai-widget-container[data-theme="auto"] {\r
+    --ai-bg: #030712;\r
+    --ai-surface: #090d16;\r
+    --ai-surface-alt: #0f172a;\r
+    --ai-border: #1e293b;\r
+    --ai-text: #f8fafc;\r
+    --ai-text-muted: #94a3b8;\r
+    --ai-user-bubble: #a3e635;\r
+    --ai-user-text: #030712;\r
+    --ai-bot-bubble: #0f172a;\r
+    --ai-bot-text: #f8fafc;\r
+    --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);\r
+  }\r
+}\r
+\r
+/* Launcher Positions */\r
+.pos-bottom-right { bottom: 20px; right: 20px; }\r
+.pos-bottom-left { bottom: 20px; left: 20px; }\r
+.pos-top-right { top: 20px; right: 20px; }\r
+.pos-top-left { top: 20px; left: 20px; }\r
+\r
+/* Floating Launcher Button */\r
+.ai-launcher-btn {\r
+  pointer-events: auto;\r
+  position: relative;\r
+  width: 56px;\r
+  height: 56px;\r
+  padding: 0;\r
+  border-radius: 50%;\r
+  background: #0b0b0b;\r
+  color: var(--ai-primary);\r
+  border: 1.5px solid var(--ai-primary);\r
+  cursor: pointer;\r
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease;\r
+  outline: none;\r
+}\r
+\r
+.ai-launcher-btn:hover {\r
+  transform: scale(1.06);\r
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ai-primary) 18%, transparent), 0 8px 24px rgba(0, 0, 0, 0.4);\r
+}\r
+\r
+.ai-launcher-btn:active {\r
+  transform: scale(0.96);\r
+}\r
+\r
+.ai-launcher-btn:focus-visible {\r
+  outline: 3px solid var(--ai-primary);\r
+  outline-offset: 3px;\r
+}\r
+\r
+.ai-launcher-btn .icon-chat,\r
+.ai-launcher-btn .icon-close {\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+}\r
+\r
+.ai-launcher-btn svg {\r
+  width: 26px;\r
+  height: 26px;\r
+  transition: transform 0.25s ease, opacity 0.2s ease;\r
+}\r
+\r
+.ai-launcher-btn .icon-chat svg {\r
+  fill: currentColor;\r
+}\r
+\r
+.ai-launcher-btn:hover .icon-chat svg {\r
+  transform: translate(2px, -2px);\r
+}\r
+\r
+.ai-launcher-btn .icon-close svg {\r
+  width: 22px;\r
+  height: 22px;\r
+  fill: none;\r
+}\r
+\r
+.ai-launcher-btn:hover .icon-close svg {\r
+  transform: rotate(90deg);\r
+}\r
+\r
+.ai-launcher-btn .icon-close {\r
+  display: none;\r
+}\r
+\r
+.ai-widget-container.is-open .ai-launcher-btn .icon-chat {\r
+  display: none;\r
+}\r
+\r
+.ai-widget-container.is-open .ai-launcher-btn .icon-close {\r
+  display: flex;\r
+}\r
+\r
+/* ".ai" brand badge (from the hirepool.ai wordmark) */\r
+.ai-launcher-badge {\r
+  position: absolute;\r
+  right: -8px;\r
+  bottom: -4px;\r
+  min-width: 26px;\r
+  height: 17px;\r
+  padding: 0 6px;\r
+  border-radius: 9px;\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+  border: 2px solid var(--ai-bg);\r
+  font-size: 11px;\r
+  font-weight: 700;\r
+  line-height: 13px;\r
+  letter-spacing: 0.2px;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  pointer-events: none;\r
+  transition: transform 0.25s ease, opacity 0.2s ease;\r
+}\r
+\r
+.ai-launcher-btn:hover .ai-launcher-badge {\r
+  transform: scale(1.05);\r
+}\r
+\r
+.ai-widget-container.is-open .ai-launcher-badge {\r
+  opacity: 0;\r
+  transform: scale(0.6);\r
+}\r
+\r
+/* Phone greeting bubble (website bot) */\r
+.ai-teaser {\r
+  pointer-events: auto;\r
+  position: absolute;\r
+  bottom: 70px;\r
+  right: 0;\r
+  width: max-content;\r
+  max-width: min(260px, calc(100vw - 40px));\r
+  display: flex;\r
+  align-items: flex-start;\r
+  gap: 4px;\r
+  padding: 10px 6px 10px 14px;\r
+  background: var(--ai-bg);\r
+  color: var(--ai-text);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 14px 14px 4px 14px;\r
+  box-shadow: var(--ai-shadow);\r
+  animation: ai-teaser-in 0.25s ease;\r
+}\r
+\r
+.pos-bottom-left .ai-teaser { right: auto; left: 0; border-radius: 14px 14px 14px 4px; }\r
+.pos-top-right .ai-teaser,\r
+.pos-top-left .ai-teaser { bottom: auto; top: 70px; }\r
+\r
+.ai-teaser-text {\r
+  all: unset;\r
+  cursor: pointer;\r
+  font-size: 13.5px;\r
+  line-height: 1.45;\r
+  color: var(--ai-text);\r
+}\r
+\r
+.ai-teaser-text:focus-visible,\r
+.ai-teaser-close:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+  outline-offset: 2px;\r
+  border-radius: 4px;\r
+}\r
+\r
+.ai-teaser-close {\r
+  all: unset;\r
+  cursor: pointer;\r
+  flex-shrink: 0;\r
+  width: 22px;\r
+  height: 22px;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  color: var(--ai-text-muted);\r
+  border-radius: 50%;\r
+}\r
+\r
+.ai-teaser-close svg {\r
+  width: 12px;\r
+  height: 12px;\r
+}\r
+\r
+.ai-widget-container.is-open .ai-teaser {\r
+  display: none;\r
+}\r
+\r
+@keyframes ai-teaser-in {\r
+  from { opacity: 0; transform: translateY(6px); }\r
+  to { opacity: 1; transform: translateY(0); }\r
+}\r
+\r
+.ai-handoff-btn {\r
+  margin-top: 2px;\r
+}\r
+\r
+/* Chat Panel */\r
+.ai-panel {\r
+  pointer-events: auto;\r
+  position: absolute;\r
+  width: 380px;\r
+  height: 560px;\r
+  max-width: calc(100vw - 32px);\r
+  max-height: calc(100vh - 100px);\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: var(--ai-radius);\r
+  box-shadow: var(--ai-shadow);\r
+  display: flex;\r
+  flex-direction: column;\r
+  overflow: hidden;\r
+  opacity: 0;\r
+  transform: scale(0.95) translateY(10px);\r
+  transform-origin: bottom right;\r
+  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);\r
+  visibility: hidden;\r
+}\r
+\r
+/* Position-based origins and anchors */\r
+.pos-bottom-right .ai-panel { bottom: 70px; right: 0; transform-origin: bottom right; }\r
+.pos-bottom-left .ai-panel { bottom: 70px; left: 0; transform-origin: bottom left; }\r
+.pos-top-right .ai-panel { top: 70px; right: 0; transform-origin: top right; }\r
+.pos-top-left .ai-panel { top: 70px; left: 0; transform-origin: top left; }\r
+\r
+.ai-widget-container.is-open .ai-panel {\r
+  opacity: 1;\r
+  transform: scale(1) translateY(0);\r
+  visibility: visible;\r
+}\r
+\r
+/* Header */\r
+.ai-header {\r
+  padding: 12px 16px;\r
+  background: var(--ai-bg);\r
+  border-bottom: 1px solid var(--ai-border);\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: space-between;\r
+  flex-shrink: 0;\r
+  user-select: none;\r
+}\r
+\r
+.ai-header-info {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 10px;\r
+}\r
+\r
+.ai-avatar {\r
+  width: 32px;\r
+  height: 32px;\r
+  border-radius: 50%;\r
+  background: #0b0b0b;\r
+  color: var(--ai-primary);\r
+  border: 1.5px solid var(--ai-primary);\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  font-weight: 600;\r
+  font-size: 14px;\r
+  overflow: hidden;\r
+  flex-shrink: 0;\r
+}\r
+\r
+.ai-avatar-icon {\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+}\r
+\r
+.ai-avatar-icon svg {\r
+  width: 17px;\r
+  height: 17px;\r
+  fill: currentColor;\r
+}\r
+\r
+.ai-avatar img {\r
+  width: 100%;\r
+  height: 100%;\r
+  object-fit: cover;\r
+}\r
+\r
+.ai-header-titles {\r
+  display: flex;\r
+  flex-direction: column;\r
+}\r
+\r
+.ai-title {\r
+  font-size: 14px;\r
+  font-weight: 600;\r
+  color: var(--ai-text);\r
+  line-height: 1.2;\r
+}\r
+\r
+.ai-status {\r
+  font-size: 11px;\r
+  color: var(--ai-text-muted);\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 4px;\r
+}\r
+\r
+.ai-status-dot {\r
+  width: 7px;\r
+  height: 7px;\r
+  border-radius: 50%;\r
+  background: #10b981;\r
+}\r
+\r
+.ai-status-dot.busy {\r
+  background: #f59e0b;\r
+  animation: pulse-dot 1.5s infinite;\r
+}\r
+\r
+@keyframes pulse-dot {\r
+  0%, 100% { opacity: 1; transform: scale(1); }\r
+  50% { opacity: 0.5; transform: scale(1.2); }\r
+}\r
+\r
+.ai-header-actions {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 4px;\r
+}\r
+\r
+.ai-icon-btn {\r
+  background: transparent;\r
+  border: none;\r
+  color: var(--ai-text-muted);\r
+  width: 30px;\r
+  height: 30px;\r
+  border-radius: var(--ai-radius-sm);\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  cursor: pointer;\r
+  transition: background-color 0.15s ease, color 0.15s ease;\r
+  outline: none;\r
+}\r
+\r
+.ai-icon-btn:hover {\r
+  background: var(--ai-surface-alt);\r
+  color: var(--ai-text);\r
+}\r
+\r
+.ai-icon-btn:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+}\r
+\r
+.ai-icon-btn svg {\r
+  width: 16px;\r
+  height: 16px;\r
+  fill: currentColor;\r
+}\r
+\r
+/* Conversation Body */\r
+.ai-body {\r
+  flex: 1;\r
+  min-height: 0;\r
+  overflow-y: auto;\r
+  overflow-x: hidden;\r
+  padding: 16px;\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 14px;\r
+  background: var(--ai-bg);\r
+  scroll-behavior: smooth;\r
+}\r
+\r
+.ai-body::-webkit-scrollbar {\r
+  width: 5px;\r
+}\r
+\r
+.ai-body::-webkit-scrollbar-thumb {\r
+  background: var(--ai-border);\r
+  border-radius: 4px;\r
+}\r
+\r
+/* Welcome Box */\r
+.ai-welcome-box {\r
+  background: var(--ai-surface);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: var(--ai-radius-sm);\r
+  padding: 14px;\r
+  margin-bottom: 4px;\r
+}\r
+\r
+.ai-welcome-greeting {\r
+  font-size: 13.5px;\r
+  color: var(--ai-text);\r
+  margin-bottom: 12px;\r
+  line-height: 1.5;\r
+}\r
+\r
+.ai-suggested-prompts-label {\r
+  font-size: 11px;\r
+  font-weight: 600;\r
+  text-transform: uppercase;\r
+  letter-spacing: 0.5px;\r
+  color: var(--ai-text-muted);\r
+  margin-bottom: 8px;\r
+}\r
+\r
+.ai-prompts-list {\r
+  display: flex;\r
+  flex-wrap: wrap;\r
+  gap: 6px;\r
+}\r
+\r
+.ai-prompt-pill {\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 14px;\r
+  padding: 5px 10px;\r
+  font-size: 12px;\r
+  color: var(--ai-text);\r
+  cursor: pointer;\r
+  transition: all 0.15s ease;\r
+  text-align: left;\r
+  outline: none;\r
+}\r
+\r
+.ai-prompt-pill:hover {\r
+  background: var(--ai-primary);\r
+  border-color: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+  transform: translateY(-1px);\r
+}\r
+\r
+.ai-prompt-pill:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+}\r
+\r
+/* Message Rows */\r
+.ai-message-row {\r
+  display: flex;\r
+  flex-direction: column;\r
+  max-width: 88%;\r
+  min-width: 0;\r
+  animation: fadeInMsg 0.2s ease;\r
+}\r
+\r
+.ai-message-row.ai-signup-row {\r
+  width: 100%;\r
+  max-width: 100%;\r
+  min-width: 0;\r
+}\r
+\r
+@keyframes fadeInMsg {\r
+  from { opacity: 0; transform: translateY(4px); }\r
+  to { opacity: 1; transform: translateY(0); }\r
+}\r
+\r
+.ai-message-row.user {\r
+  align-self: flex-end;\r
+}\r
+\r
+.ai-message-row.assistant {\r
+  align-self: flex-start;\r
+}\r
+\r
+.ai-bubble {\r
+  padding: 10px 14px;\r
+  border-radius: 14px;\r
+  font-size: 13.5px;\r
+  line-height: 1.55;\r
+  word-break: break-word;\r
+}\r
+\r
+.ai-message-row.user .ai-bubble {\r
+  background: var(--ai-user-bubble);\r
+  color: var(--ai-user-text);\r
+  border-bottom-right-radius: 4px;\r
+}\r
+\r
+.ai-message-row.assistant .ai-bubble {\r
+  background: var(--ai-bot-bubble);\r
+  color: var(--ai-bot-text);\r
+  border-bottom-left-radius: 4px;\r
+  border: 1px solid var(--ai-border);\r
+}\r
+\r
+/* Assistant Bubble Markdown elements */\r
+.ai-bubble p {\r
+  margin: 0 0 8px 0;\r
+}\r
+\r
+/* The Markdown renderer leaves stray breaks between list items and empty paragraphs. */\r
+.ai-bubble ul > br,\r
+.ai-bubble ol > br,\r
+.ai-bubble p:empty {\r
+  display: none;\r
+}\r
+.ai-bubble p:last-child {\r
+  margin-bottom: 0;\r
+}\r
+\r
+.ai-bubble h2, .ai-bubble h3, .ai-bubble h4 {\r
+  margin: 10px 0 6px 0;\r
+  color: var(--ai-text);\r
+  font-weight: 600;\r
+}\r
+.ai-bubble h2 { font-size: 15px; }\r
+.ai-bubble h3 { font-size: 14px; }\r
+.ai-bubble h4 { font-size: 13.5px; }\r
+\r
+.ai-bubble ul, .ai-bubble ol {\r
+  margin: 6px 0 8px 18px;\r
+  padding: 0;\r
+}\r
+\r
+.ai-bubble li {\r
+  margin-bottom: 4px;\r
+}\r
+\r
+.ai-bubble blockquote {\r
+  margin: 8px 0;\r
+  padding: 4px 10px;\r
+  border-left: 3px solid var(--ai-primary);\r
+  background: var(--ai-surface);\r
+  color: var(--ai-text-muted);\r
+  font-style: italic;\r
+}\r
+\r
+.ai-bubble a {\r
+  color: var(--ai-primary);\r
+  text-decoration: underline;\r
+}\r
+\r
+.ai-bubble code.inline-code {\r
+  background: rgba(0, 0, 0, 0.08);\r
+  padding: 2px 5px;\r
+  border-radius: 4px;\r
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;\r
+  font-size: 12px;\r
+}\r
+\r
+[data-theme="dark"] .ai-bubble code.inline-code {\r
+  background: rgba(255, 255, 255, 0.12);\r
+}\r
+\r
+/* Code block container */\r
+.code-block-wrapper {\r
+  margin: 8px 0;\r
+  border-radius: 6px;\r
+  overflow: hidden;\r
+  background: #1e1e24;\r
+  color: #f8f8f2;\r
+  font-size: 12px;\r
+}\r
+\r
+.code-header {\r
+  display: flex;\r
+  justify-content: space-between;\r
+  align-items: center;\r
+  padding: 4px 10px;\r
+  background: #282a36;\r
+  color: #a0a0a0;\r
+  font-size: 11px;\r
+}\r
+\r
+.code-lang {\r
+  text-transform: uppercase;\r
+  font-weight: 600;\r
+}\r
+\r
+.copy-code-btn {\r
+  background: transparent;\r
+  border: 1px solid #44475a;\r
+  color: #f8f8f2;\r
+  border-radius: 4px;\r
+  padding: 2px 6px;\r
+  font-size: 10px;\r
+  cursor: pointer;\r
+}\r
+\r
+.copy-code-btn:hover {\r
+  background: #44475a;\r
+}\r
+\r
+.code-block-wrapper pre {\r
+  margin: 0;\r
+  padding: 10px;\r
+  overflow-x: auto;\r
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;\r
+}\r
+\r
+/* Message Meta & Action Bar */\r
+.ai-message-actions {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 8px;\r
+  margin-top: 4px;\r
+  font-size: 11px;\r
+  color: var(--ai-text-muted);\r
+}\r
+\r
+.ai-msg-action-btn {\r
+  background: transparent;\r
+  border: none;\r
+  color: var(--ai-text-muted);\r
+  font-size: 11px;\r
+  cursor: pointer;\r
+  display: inline-flex;\r
+  align-items: center;\r
+  gap: 3px;\r
+  padding: 2px 6px;\r
+  border-radius: 4px;\r
+  transition: all 0.15s ease;\r
+  outline: none;\r
+}\r
+\r
+.ai-msg-action-btn:hover {\r
+  background: var(--ai-surface-alt);\r
+  color: var(--ai-text);\r
+}\r
+\r
+.ai-msg-action-btn:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+}\r
+\r
+/* Typing / Streaming Indicator */\r
+.ai-streaming-indicator {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 4px;\r
+  padding: 8px 12px;\r
+  border-radius: 12px;\r
+  background: var(--ai-bot-bubble);\r
+  border: 1px solid var(--ai-border);\r
+  width: fit-content;\r
+  align-self: flex-start;\r
+}\r
+\r
+.ai-typing-dot {\r
+  width: 6px;\r
+  height: 6px;\r
+  border-radius: 50%;\r
+  background: var(--ai-text-muted);\r
+  animation: typingBounce 1.4s infinite ease-in-out both;\r
+}\r
+\r
+.ai-typing-dot:nth-child(1) { animation-delay: -0.32s; }\r
+.ai-typing-dot:nth-child(2) { animation-delay: -0.16s; }\r
+\r
+@keyframes typingBounce {\r
+  0%, 80%, 100% { transform: scale(0); opacity: 0.4; }\r
+  40% { transform: scale(1); opacity: 1; }\r
+}\r
+\r
+/* Error Banner */\r
+.ai-error-banner {\r
+  background: #fef2f2;\r
+  border: 1px solid #fecaca;\r
+  color: #991b1b;\r
+  border-radius: var(--ai-radius-sm);\r
+  padding: 8px 12px;\r
+  font-size: 12px;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: space-between;\r
+  gap: 8px;\r
+  margin: 4px 0;\r
+}\r
+\r
+[data-theme="dark"] .ai-error-banner {\r
+  background: #450a0a;\r
+  border-color: #7f1d1d;\r
+  color: #fca5a5;\r
+}\r
+\r
+.ai-error-retry-btn {\r
+  background: #dc2626;\r
+  color: white;\r
+  border: none;\r
+  padding: 3px 8px;\r
+  border-radius: 4px;\r
+  font-size: 11px;\r
+  font-weight: 500;\r
+  cursor: pointer;\r
+}\r
+\r
+/* Footer / Input Area */\r
+.ai-footer {\r
+  padding: 12px 14px;\r
+  background: var(--ai-bg);\r
+  border-top: 1px solid var(--ai-border);\r
+  flex-shrink: 0;\r
+}\r
+\r
+.ai-input-form {\r
+  display: flex;\r
+  align-items: flex-end;\r
+  gap: 8px;\r
+  background: var(--ai-surface);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 18px;\r
+  padding: 4px 6px 4px 12px;\r
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;\r
+}\r
+\r
+.ai-input-form:focus-within {\r
+  border-color: var(--ai-primary);\r
+  box-shadow: 0 0 0 2px rgba(163, 230, 53, 0.25);\r
+}\r
+\r
+.ai-textarea {\r
+  flex: 1;\r
+  background: transparent;\r
+  border: none;\r
+  outline: none;\r
+  resize: none;\r
+  padding: 6px 0;\r
+  max-height: 120px;\r
+  min-height: 24px;\r
+  font-family: inherit;\r
+  font-size: 13.5px;\r
+  line-height: 1.4;\r
+  color: var(--ai-text);\r
+}\r
+\r
+.ai-textarea::placeholder {\r
+  color: var(--ai-text-muted);\r
+}\r
+\r
+.ai-send-btn, .ai-stop-btn {\r
+  width: 32px;\r
+  height: 32px;\r
+  border-radius: 50%;\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+  border: none;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  cursor: pointer;\r
+  flex-shrink: 0;\r
+  transition: background-color 0.15s ease, transform 0.1s ease;\r
+  outline: none;\r
+}\r
+\r
+.ai-send-btn:hover, .ai-stop-btn:hover {\r
+  background: var(--ai-primary-hover);\r
+}\r
+\r
+.ai-send-btn:disabled {\r
+  background: var(--ai-border);\r
+  color: var(--ai-text-muted);\r
+  cursor: not-allowed;\r
+}\r
+\r
+.ai-stop-btn {\r
+  background: #ef4444;\r
+}\r
+\r
+.ai-stop-btn:hover {\r
+  background: #dc2626;\r
+}\r
+\r
+.ai-send-btn svg, .ai-stop-btn svg {\r
+  width: 15px;\r
+  height: 15px;\r
+  fill: currentColor;\r
+}\r
+\r
+.ai-footer-note {\r
+  font-size: 10.5px;\r
+  color: var(--ai-text-muted);\r
+  text-align: center;\r
+  margin-top: 6px;\r
+}\r
+\r
+/* Reduced Motion */\r
+@media (prefers-reduced-motion: reduce) {\r
+  .ai-launcher-btn, .ai-launcher-btn svg, .ai-launcher-badge, .ai-teaser, .ai-panel, .ai-message-row, .ai-prompt-pill {\r
+    transition: none !important;\r
+    animation: none !important;\r
+  }\r
+}\r
+\r
+/* Mobile & Small Screen Adaptability */\r
+@media (max-width: 640px) {\r
+  .ai-panel {\r
+    width: 100vw !important;\r
+    height: 100% !important;\r
+    max-width: 100vw !important;\r
+    max-height: 100vh !important;\r
+    top: 0 !important;\r
+    left: 0 !important;\r
+    right: 0 !important;\r
+    bottom: 0 !important;\r
+    border-radius: 0 !important;\r
+    position: fixed !important;\r
+  }\r
+\r
+  .pos-bottom-right, .pos-bottom-left, .pos-top-right, .pos-top-left {\r
+    bottom: 16px;\r
+    right: 16px;\r
+    left: auto;\r
+    top: auto;\r
+  }\r
+}\r
+\r
+@media (max-width: 480px) {\r
+  .ai-body {\r
+    padding: 12px;\r
+  }\r
+\r
+  .ai-form-row {\r
+    grid-template-columns: minmax(0, 1fr);\r
+  }\r
+}\r
+\r
+/* Action Proposal Card */\r
+.ai-action-card {\r
+  margin-top: 10px;\r
+  width: 100%;\r
+  max-width: 100%;\r
+  min-width: 0;\r
+  box-sizing: border-box;\r
+  background: var(--ai-surface);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: var(--ai-radius-sm);\r
+  padding: 12px;\r
+  font-size: 12.5px;\r
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 8px;\r
+}\r
+\r
+[data-theme="dark"] .ai-action-card {\r
+  background: rgba(255, 255, 255, 0.04);\r
+  border-color: rgba(255, 255, 255, 0.12);\r
+}\r
+\r
+.ai-action-header {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 8px;\r
+}\r
+\r
+.ai-action-badge {\r
+  background: rgba(79, 70, 229, 0.12);\r
+  color: var(--ai-primary);\r
+  font-size: 10.5px;\r
+  font-weight: 600;\r
+  padding: 2px 7px;\r
+  border-radius: 10px;\r
+  text-transform: uppercase;\r
+  letter-spacing: 0.5px;\r
+}\r
+\r
+[data-theme="dark"] .ai-action-badge {\r
+  background: rgba(99, 102, 241, 0.25);\r
+  color: #818cf8;\r
+}\r
+\r
+.ai-action-title {\r
+  font-weight: 600;\r
+  color: var(--ai-text);\r
+  font-size: 13px;\r
+  flex: 1;\r
+}\r
+\r
+.ai-action-explanation {\r
+  margin: 0;\r
+  color: var(--ai-text-muted);\r
+  line-height: 1.4;\r
+  font-size: 12px;\r
+}\r
+\r
+.ai-action-details {\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  padding: 8px 10px;\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 4px;\r
+}\r
+\r
+[data-theme="dark"] .ai-action-details {\r
+  background: rgba(0, 0, 0, 0.2);\r
+}\r
+\r
+.ai-action-param-row {\r
+  display: flex;\r
+  gap: 8px;\r
+  font-size: 11.5px;\r
+}\r
+\r
+.ai-action-param-key {\r
+  font-weight: 500;\r
+  color: var(--ai-text-muted);\r
+  min-width: 80px;\r
+  flex-shrink: 0;\r
+}\r
+\r
+.ai-action-param-val {\r
+  color: var(--ai-text);\r
+  word-break: break-word;\r
+  font-weight: 500;\r
+}\r
+\r
+.ai-action-risk {\r
+  border-radius: 999px;\r
+  font-size: 10px;\r
+  font-weight: 600;\r
+  padding: 2px 7px;\r
+  text-transform: uppercase;\r
+}\r
+\r
+.ai-action-risk.risk-read {\r
+  background: rgba(16, 185, 129, 0.12);\r
+  color: #047857;\r
+}\r
+\r
+.ai-action-risk.risk-write {\r
+  background: rgba(79, 70, 229, 0.12);\r
+  color: var(--ai-primary);\r
+}\r
+\r
+.ai-action-risk.risk-destructive {\r
+  background: rgba(220, 38, 38, 0.12);\r
+  color: #b91c1c;\r
+}\r
+\r
+.ai-action-acknowledgement {\r
+  align-items: flex-start;\r
+  color: var(--ai-text-muted);\r
+  display: flex;\r
+  font-size: 11px;\r
+  gap: 7px;\r
+  line-height: 1.4;\r
+}\r
+\r
+.ai-action-acknowledgement input {\r
+  margin: 1px 0 0;\r
+}\r
+\r
+.ai-action-controls {\r
+  display: flex;\r
+  flex-wrap: wrap;\r
+  gap: 8px;\r
+  margin-top: 4px;\r
+  width: 100%;\r
+  min-width: 0;\r
+}\r
+\r
+.ai-btn-action-confirm, .ai-btn-action-cancel {\r
+  border-radius: 6px;\r
+  font-size: 12px;\r
+  font-weight: 500;\r
+  padding: 6px 12px;\r
+  cursor: pointer;\r
+  border: 1px solid transparent;\r
+  transition: all 0.15s ease;\r
+  min-width: 0;\r
+  white-space: normal;\r
+  text-align: center;\r
+}\r
+\r
+.ai-btn-action-confirm {\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+  flex: 1;\r
+}\r
+\r
+.ai-btn-action-confirm:hover:not(:disabled) {\r
+  background: var(--ai-primary-hover);\r
+}\r
+\r
+.ai-btn-action-confirm:disabled {\r
+  opacity: 0.6;\r
+  cursor: not-allowed;\r
+}\r
+\r
+.ai-btn-action-cancel {\r
+  background: transparent;\r
+  border-color: var(--ai-border);\r
+  color: var(--ai-text-muted);\r
+}\r
+\r
+.ai-btn-action-cancel:hover:not(:disabled) {\r
+  background: var(--ai-bg);\r
+  color: var(--ai-text);\r
+}\r
+\r
+.ai-action-status-msg {\r
+  border-radius: 6px;\r
+  padding: 6px 10px;\r
+  font-size: 11.5px;\r
+  font-weight: 500;\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 6px;\r
+}\r
+\r
+.ai-action-status-msg.executing {\r
+  background: #eff6ff;\r
+  color: #1d4ed8;\r
+  border: 1px solid #bfdbfe;\r
+}\r
+\r
+.ai-action-status-msg.success {\r
+  background: #f0fdf4;\r
+  color: #15803d;\r
+  border: 1px solid #bbf7d0;\r
+}\r
+\r
+.ai-action-status-msg.error {\r
+  background: #fef2f2;\r
+  color: #b91c1c;\r
+  border: 1px solid #fecaca;\r
+}\r
+\r
+.ai-action-status-msg.cancelled {\r
+  background: var(--ai-bg);\r
+  color: var(--ai-text-muted);\r
+  border: 1px solid var(--ai-border);\r
+}\r
+\r
+[data-theme="dark"] .ai-action-status-msg.executing {\r
+  background: #1e3a8a;\r
+  color: #93c5fd;\r
+  border-color: #2563eb;\r
+}\r
+\r
+[data-theme="dark"] .ai-action-status-msg.success {\r
+  background: #14532d;\r
+  color: #86efac;\r
+  border-color: #16a34a;\r
+}\r
+\r
+[data-theme="dark"] .ai-action-status-msg.error {\r
+  background: #7f1d1d;\r
+  color: #fca5a5;\r
+  border-color: #dc2626;\r
+}\r
+\r
+/* Document Attachment Button */\r
+.ai-attach-btn {\r
+  width: 32px;\r
+  height: 32px;\r
+  border-radius: 50%;\r
+  background: transparent;\r
+  color: var(--ai-text-muted);\r
+  border: none;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  cursor: pointer;\r
+  flex-shrink: 0;\r
+  transition: all 0.15s ease;\r
+  outline: none;\r
+  margin-right: 4px;\r
+}\r
+.ai-attach-btn:hover {\r
+  background: var(--ai-bg);\r
+  color: var(--ai-primary);\r
+}\r
+.ai-attach-btn svg {\r
+  width: 17px;\r
+  height: 17px;\r
+  fill: currentColor;\r
+}\r
+\r
+.ai-processing-state {\r
+  display: flex;\r
+  flex-wrap: wrap;\r
+  align-items: center;\r
+  gap: 8px;\r
+  font-size: 12.5px;\r
+  color: var(--ai-text);\r
+}\r
+.ai-document-consent {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 10px;\r
+  padding: 12px;\r
+  background: var(--ai-surface);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 8px;\r
+}\r
+.ai-document-consent h3,\r
+.ai-document-consent p {\r
+  margin: 0;\r
+}\r
+.ai-document-consent h3 {\r
+  font-size: 14px;\r
+  color: var(--ai-text);\r
+}\r
+.ai-document-consent p,\r
+.ai-document-consent-choice {\r
+  font-size: 12px;\r
+  color: var(--ai-text);\r
+}\r
+.ai-document-consent-choice {\r
+  display: flex;\r
+  align-items: flex-start;\r
+  gap: 8px;\r
+  cursor: pointer;\r
+}\r
+.ai-document-consent-choice input {\r
+  flex: 0 0 auto;\r
+  margin-top: 3px;\r
+}\r
+.ai-document-consent-controls {\r
+  display: flex;\r
+  gap: 8px;\r
+}\r
+.ai-document-consent-controls button,\r
+.ai-btn-document-cancel,\r
+.ai-btn-document-remove {\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  padding: 6px 10px;\r
+  color: var(--ai-text);\r
+  background: var(--ai-bg);\r
+  font: inherit;\r
+  cursor: pointer;\r
+}\r
+.ai-document-consent-controls .ai-btn-document-consent-accept {\r
+  border-color: var(--ai-primary);\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+}\r
+.ai-document-consent-controls button:disabled,\r
+.ai-btn-document-cancel:disabled,\r
+.ai-btn-document-remove:disabled {\r
+  opacity: 0.55;\r
+  cursor: not-allowed;\r
+}\r
+.ai-document-cancelled {\r
+  color: var(--ai-text-muted);\r
+}\r
+.ai-hirepool-resume-card {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 10px;\r
+  padding: 12px;\r
+  background: var(--ai-surface);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 8px;\r
+}\r
+.ai-hirepool-resume-card strong,\r
+.ai-hirepool-resume-card p {\r
+  margin: 0;\r
+  overflow-wrap: anywhere;\r
+}\r
+.ai-hirepool-resume-card strong {\r
+  color: var(--ai-text);\r
+  font-size: 13px;\r
+}\r
+.ai-hirepool-resume-card p {\r
+  color: var(--ai-text-muted);\r
+  font-size: 12px;\r
+}\r
+.ai-hirepool-resume-controls {\r
+  display: flex;\r
+  flex-wrap: wrap;\r
+  gap: 8px;\r
+}\r
+.ai-hirepool-resume-card button {\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  padding: 6px 10px;\r
+  color: var(--ai-text);\r
+  background: var(--ai-bg);\r
+  font: inherit;\r
+  cursor: pointer;\r
+}\r
+.ai-hirepool-resume-card .ai-btn-resume-confirm,\r
+.ai-hirepool-resume-card .ai-btn-resume-prepare {\r
+  border-color: var(--ai-primary);\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+}\r
+.ai-hirepool-resume-card button:disabled,\r
+.ai-attach-btn:disabled {\r
+  opacity: 0.55;\r
+  cursor: not-allowed;\r
+}\r
+.ai-spinner {\r
+  width: 16px;\r
+  height: 16px;\r
+  border: 2px solid rgba(79, 70, 229, 0.2);\r
+  border-top-color: var(--ai-primary);\r
+  border-radius: 50%;\r
+  animation: ai-spin 0.8s linear infinite;\r
+}\r
+@keyframes ai-spin {\r
+  to { transform: rotate(360deg); }\r
+}\r
+\r
+/* Generic Document Attachment Card */\r
+.ai-doc-card {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 8px;\r
+  background: var(--ai-surface);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 8px;\r
+  padding: 10px 12px;\r
+  margin: 4px 0;\r
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);\r
+}\r
+.ai-doc-header {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 10px;\r
+}\r
+.ai-doc-icon {\r
+  font-size: 22px;\r
+  line-height: 1;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+}\r
+.ai-doc-details {\r
+  flex: 1;\r
+  min-width: 0;\r
+}\r
+.ai-doc-title {\r
+  font-size: 13px;\r
+  font-weight: 600;\r
+  color: var(--ai-text);\r
+  white-space: nowrap;\r
+  overflow: hidden;\r
+  text-overflow: ellipsis;\r
+}\r
+.ai-doc-meta {\r
+  font-size: 11px;\r
+  color: var(--ai-text-muted);\r
+  margin-top: 2px;\r
+}\r
+.ai-doc-badge {\r
+  font-size: 10.5px;\r
+  font-weight: 500;\r
+  color: #059669;\r
+  background: rgba(16, 185, 129, 0.12);\r
+  padding: 3px 8px;\r
+  border-radius: 12px;\r
+  white-space: nowrap;\r
+}\r
+[data-theme="dark"] .ai-doc-badge {\r
+  color: #34d399;\r
+  background: rgba(16, 185, 129, 0.22);\r
+}\r
+.ai-doc-hint {\r
+  font-size: 12px;\r
+  color: var(--ai-text);\r
+  line-height: 1.4;\r
+  margin: 0;\r
+}\r
+\r
+/* In-Chat Signup & Onboarding Styles */\r
+.ai-signup-card {\r
+  border-left: 3px solid #16a34a;\r
+  width: 100%;\r
+  max-width: 100%;\r
+  min-width: 0;\r
+  box-sizing: border-box;\r
+}\r
+.ai-signup-role-options {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 8px;\r
+  margin: 8px 0;\r
+}\r
+.ai-role-btn {\r
+  display: flex;\r
+  flex-direction: column;\r
+  align-items: flex-start;\r
+  padding: 10px 12px;\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 8px;\r
+  background: var(--ai-bg);\r
+  cursor: pointer;\r
+  transition: all 0.2s ease;\r
+  text-align: left;\r
+}\r
+.ai-role-btn:hover {\r
+  border-color: #16a34a;\r
+  background: rgba(22, 163, 74, 0.05);\r
+}\r
+.ai-role-badge {\r
+  font-size: 10.5px;\r
+  font-weight: 600;\r
+  color: #16a34a;\r
+  text-transform: uppercase;\r
+  margin-bottom: 2px;\r
+}\r
+.ai-role-title {\r
+  font-size: 13.5px;\r
+  font-weight: 600;\r
+  color: var(--ai-text);\r
+}\r
+.ai-role-desc {\r
+  font-size: 11.5px;\r
+  color: var(--ai-text-muted);\r
+  margin-top: 2px;\r
+}\r
+.ai-signup-form,\r
+.ai-login-form {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 10px;\r
+  margin-top: 8px;\r
+  width: 100%;\r
+  min-width: 0;\r
+  max-width: 100%;\r
+  box-sizing: border-box;\r
+}\r
+\r
+.ai-profile-form {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 10px;\r
+  margin-top: 8px;\r
+  width: 100%;\r
+  min-width: 0;\r
+  max-width: 100%;\r
+  box-sizing: border-box;\r
+}\r
+\r
+.ai-login-card {\r
+  border-left: 3px solid #2563eb;\r
+  width: 100%;\r
+  max-width: 100%;\r
+  min-width: 0;\r
+  box-sizing: border-box;\r
+}\r
+\r
+.ai-login-secondary {\r
+  margin-top: 8px;\r
+  text-align: center;\r
+  width: 100%;\r
+}\r
+\r
+.ai-link-button {\r
+  background: none;\r
+  border: none;\r
+  color: #2563eb;\r
+  text-decoration: underline;\r
+  font-size: 11.5px;\r
+  cursor: pointer;\r
+  padding: 4px 6px;\r
+  font-family: inherit;\r
+  transition: color 0.15s ease;\r
+}\r
+\r
+.ai-link-button:hover {\r
+  color: #1d4ed8;\r
+}\r
+\r
+[data-theme="dark"] .ai-link-button {\r
+  color: #60a5fa;\r
+}\r
+\r
+[data-theme="dark"] .ai-link-button:hover {\r
+  color: #93c5fd;\r
+}\r
+.ai-form-row {\r
+  display: grid;\r
+  grid-template-columns: repeat(2, minmax(0, 1fr));\r
+  gap: 8px;\r
+  align-items: start;\r
+  width: 100%;\r
+  min-width: 0;\r
+  max-width: 100%;\r
+  box-sizing: border-box;\r
+}\r
+.ai-form-group {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 4px;\r
+  width: 100%;\r
+  min-width: 0;\r
+  max-width: 100%;\r
+  box-sizing: border-box;\r
+}\r
+.ai-form-label {\r
+  font-size: 11.5px;\r
+  font-weight: 500;\r
+  color: var(--ai-text);\r
+  line-height: 1.35;\r
+  overflow-wrap: break-word;\r
+  word-wrap: break-word;\r
+  min-width: 0;\r
+}\r
+.ai-form-input {\r
+  box-sizing: border-box;\r
+  width: 100%;\r
+  min-width: 0;\r
+  max-width: 100%;\r
+  margin: 0;\r
+  padding: 7px 10px;\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  font-size: 12.5px;\r
+  background: var(--ai-bg);\r
+  color: var(--ai-text);\r
+  outline: none;\r
+  font-family: inherit;\r
+}\r
+.ai-form-input:focus {\r
+  border-color: #16a34a;\r
+  box-shadow: 0 0 0 1px #16a34a;\r
+}\r
+.ai-password-wrapper {\r
+  position: relative;\r
+  display: flex;\r
+  align-items: center;\r
+}\r
+.ai-password-wrapper .ai-form-input {\r
+  width: 100%;\r
+  padding-right: 32px;\r
+}\r
+.ai-password-toggle {\r
+  position: absolute;\r
+  right: 8px;\r
+  background: none;\r
+  border: none;\r
+  cursor: pointer;\r
+  font-size: 14px;\r
+  color: var(--ai-text-muted);\r
+  padding: 2px;\r
+}\r
+.ai-form-input.ai-input-invalid {\r
+  border-color: #dc2626 !important;\r
+  background-color: #fef2f2 !important;\r
+}\r
+.ai-field-error {\r
+  color: #dc2626;\r
+  font-size: 11px;\r
+  margin-top: 2px;\r
+  line-height: 1.3;\r
+}\r
+\r
+/* Structured Action Review Cards & Tables */\r
+.ai-review-card-content {\r
+  margin: 8px 0;\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 8px;\r
+}\r
+.ai-review-table {\r
+  width: 100%;\r
+  border-collapse: collapse;\r
+  font-size: 12px;\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  overflow: hidden;\r
+}\r
+.ai-review-table tr {\r
+  border-bottom: 1px solid var(--ai-border);\r
+}\r
+.ai-review-table tr:last-child {\r
+  border-bottom: none;\r
+}\r
+.ai-review-key {\r
+  text-align: left;\r
+  padding: 6px 10px;\r
+  width: 38%;\r
+  font-weight: 600;\r
+  color: var(--ai-text-muted);\r
+  background: rgba(0, 0, 0, 0.02);\r
+  vertical-align: top;\r
+}\r
+.ai-review-val {\r
+  padding: 6px 10px;\r
+  color: var(--ai-text);\r
+  font-weight: 500;\r
+  vertical-align: top;\r
+}\r
+.ai-review-section {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 4px;\r
+}\r
+.ai-review-section-title {\r
+  font-size: 11px;\r
+  font-weight: 600;\r
+  text-transform: uppercase;\r
+  letter-spacing: 0.5px;\r
+  color: var(--ai-text-muted);\r
+}\r
+.ai-review-tags {\r
+  display: flex;\r
+  flex-wrap: wrap;\r
+  gap: 4px;\r
+}\r
+.ai-review-tag {\r
+  display: inline-block;\r
+  padding: 2px 8px;\r
+  border-radius: 12px;\r
+  font-size: 11px;\r
+  font-weight: 500;\r
+  background: #e0f2fe;\r
+  color: #0369a1;\r
+  border: 1px solid #bae6fd;\r
+}\r
+.ai-review-tag.preferred {\r
+  background: #f1f5f9;\r
+  color: #475569;\r
+  border-color: #cbd5e1;\r
+}\r
+.ai-review-desc {\r
+  font-size: 11.5px;\r
+  line-height: 1.4;\r
+  color: var(--ai-text);\r
+  padding: 6px 8px;\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  max-height: 120px;\r
+  overflow-y: auto;\r
+  white-space: pre-wrap;\r
+}\r
+.ai-btn-action-edit {\r
+  background: transparent;\r
+  color: var(--ai-text);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 6px;\r
+  padding: 6px 12px;\r
+  font-size: 12px;\r
+  cursor: pointer;\r
+  transition: all 0.15s ease;\r
+}\r
+.ai-btn-action-edit:hover {\r
+  background: rgba(0, 0, 0, 0.05);\r
+  border-color: var(--ai-text-muted);\r
+}\r
+.ai-verification-body {\r
+  padding: 4px 0;\r
+  width: 100%;\r
+  min-width: 0;\r
+  box-sizing: border-box;\r
+}\r
+.ai-role-btn {\r
+  width: 100%;\r
+  box-sizing: border-box;\r
+}\r
+/* Website bot: the welcome is a chat message, so the static welcome box is hidden */\r
+.ai-widget-container.ai-chat-welcome .ai-welcome-box {\r
+  display: none;\r
+}\r
+\r
+/* Website: role cards welcome */\r
+.ai-role-cards {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 8px;\r
+  margin-top: 10px;\r
+  width: 100%;\r
+}\r
+\r
+.ai-message-row.assistant:has(.ai-role-cards) {\r
+  flex-direction: column;\r
+  align-items: stretch;\r
+}\r
+\r
+.ai-message-row.assistant:has(.ai-role-cards) .ai-bubble {\r
+  align-self: flex-start;\r
+}\r
+\r
+.ai-role-card {\r
+  display: flex;\r
+  align-items: center;\r
+  gap: 12px;\r
+  width: 100%;\r
+  box-sizing: border-box;\r
+  padding: 11px 12px;\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-border);\r
+  border-radius: 12px;\r
+  cursor: pointer;\r
+  text-align: left;\r
+  font-family: inherit;\r
+  color: var(--ai-text);\r
+  transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.1s ease;\r
+}\r
+\r
+.ai-role-card:hover {\r
+  border-color: var(--ai-primary);\r
+  background: rgba(163, 230, 53, 0.08);\r
+}\r
+\r
+.ai-role-card:active { transform: scale(0.99); }\r
+\r
+.ai-role-card:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+  outline-offset: 2px;\r
+}\r
+\r
+.ai-role-card-icon {\r
+  width: 36px;\r
+  height: 36px;\r
+  border-radius: 10px;\r
+  background: rgba(163, 230, 53, 0.18);\r
+  color: #3f6212;\r
+  display: flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  flex-shrink: 0;\r
+}\r
+\r
+.ai-role-card-icon svg,\r
+.ai-role-card-chevron svg {\r
+  width: 18px;\r
+  height: 18px;\r
+  fill: currentColor;\r
+}\r
+\r
+.ai-role-card-text {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 2px;\r
+  flex: 1;\r
+  min-width: 0;\r
+}\r
+\r
+.ai-role-card-title {\r
+  font-size: 13.5px;\r
+  font-weight: 600;\r
+  line-height: 1.25;\r
+}\r
+\r
+.ai-role-card-subtitle {\r
+  font-size: 12px;\r
+  color: var(--ai-text-muted);\r
+  line-height: 1.3;\r
+}\r
+\r
+.ai-role-card-chevron {\r
+  color: var(--ai-text-muted);\r
+  display: flex;\r
+  flex-shrink: 0;\r
+}\r
+\r
+.ai-role-card:hover .ai-role-card-chevron { color: #3f6212; }\r
+\r
+[data-theme="dark"] .ai-role-card-icon,\r
+[data-theme="dark"] .ai-role-card:hover .ai-role-card-chevron { color: var(--ai-primary); }\r
+\r
+@media (prefers-color-scheme: dark) {\r
+  [data-theme="auto"] .ai-role-card-icon,\r
+  [data-theme="auto"] .ai-role-card:hover .ai-role-card-chevron { color: var(--ai-primary); }\r
+}\r
+\r
+/* Website look: dark branded header, pill input, no keyboard hint */\r
+.ai-theme-hirepool .ai-header {\r
+  background: #0f1720;\r
+  border-bottom-color: #0f1720;\r
+}\r
+\r
+.ai-theme-hirepool .ai-title { color: #ffffff; }\r
+\r
+.ai-theme-hirepool .ai-status { color: #a3e635; }\r
+\r
+.ai-theme-hirepool .ai-status-dot { background: #a3e635; }\r
+\r
+.ai-theme-hirepool .ai-header .ai-icon-btn { color: #cbd5e1; }\r
+\r
+.ai-theme-hirepool .ai-header .ai-icon-btn:hover {\r
+  color: #ffffff;\r
+  background: rgba(255, 255, 255, 0.08);\r
+}\r
+\r
+.ai-theme-hirepool .ai-input-form {\r
+  border-radius: 999px;\r
+  border: 1.5px solid var(--ai-primary);\r
+  align-items: center;\r
+}\r
+\r
+.ai-theme-hirepool .ai-textarea {\r
+  scrollbar-width: none;\r
+}\r
+\r
+.ai-theme-hirepool .ai-textarea::-webkit-scrollbar { display: none; }\r
+\r
+.ai-theme-hirepool .ai-footer-note { display: none; }\r
+\r
+/* Website: account buttons. A bar before the chat starts, header pills after. */\r
+.ai-auth-bar,\r
+.ai-header-signin,\r
+.ai-header-signup { display: none; }\r
+\r
+.ai-surface-website .ai-auth-bar {\r
+  display: flex;\r
+  gap: 8px;\r
+  padding: 0 14px 12px;\r
+  background: #0f1720;\r
+  flex-shrink: 0;\r
+}\r
+\r
+.ai-surface-website.ai-has-chat .ai-auth-bar { display: none; }\r
+\r
+.ai-auth-btn {\r
+  flex: 1;\r
+  display: inline-flex;\r
+  align-items: center;\r
+  justify-content: center;\r
+  gap: 6px;\r
+  height: 34px;\r
+  border-radius: 10px;\r
+  font-family: inherit;\r
+  font-size: 13px;\r
+  font-weight: 600;\r
+  cursor: pointer;\r
+  transition: background-color 0.15s ease, border-color 0.15s ease;\r
+}\r
+\r
+.ai-auth-btn svg { width: 16px; height: 16px; fill: currentColor; }\r
+\r
+.ai-auth-signin {\r
+  background: transparent;\r
+  color: #e6edf3;\r
+  border: 1px solid #3a4856;\r
+}\r
+\r
+.ai-auth-signin:hover { border-color: #a3e635; color: #ffffff; }\r
+\r
+.ai-auth-signup {\r
+  background: #a3e635;\r
+  color: #0f1720;\r
+  border: 1px solid #a3e635;\r
+}\r
+\r
+.ai-auth-signup:hover { background: #bef264; border-color: #bef264; }\r
+\r
+.ai-auth-btn:focus-visible,\r
+.ai-header-signin:focus-visible,\r
+.ai-header-signup:focus-visible {\r
+  outline: 2px solid #a3e635;\r
+  outline-offset: 2px;\r
+}\r
+\r
+.ai-surface-website.ai-has-chat .ai-header-signin,\r
+.ai-surface-website.ai-has-chat .ai-header-signup {\r
+  display: inline-flex;\r
+  align-items: center;\r
+  height: 26px;\r
+  padding: 0 10px;\r
+  border-radius: 999px;\r
+  font-family: inherit;\r
+  font-size: 12px;\r
+  font-weight: 600;\r
+  cursor: pointer;\r
+  white-space: nowrap;\r
+}\r
+\r
+.ai-surface-website .ai-header-signin {\r
+  background: transparent;\r
+  color: #cbd5e1;\r
+  border: none;\r
+}\r
+\r
+.ai-surface-website .ai-header-signin:hover { color: #ffffff; }\r
+\r
+.ai-surface-website .ai-header-signup {\r
+  background: #a3e635;\r
+  color: #0f1720;\r
+  border: none;\r
+  margin-right: 4px;\r
+}\r
+\r
+/* Website: roomier conversation with clear gaps between messages */\r
+.ai-theme-hirepool .ai-body {\r
+  background: #f6f8fa;\r
+  gap: 12px;\r
+}\r
+\r
+.ai-theme-hirepool .ai-messages-list {\r
+  display: flex;\r
+  flex-direction: column;\r
+  gap: 12px;\r
+}\r
+\r
+.ai-theme-hirepool .ai-message-row.assistant {\r
+  position: relative;\r
+  padding-left: 30px;\r
+  max-width: 100%;\r
+  box-sizing: border-box;\r
+  gap: 8px;\r
+}\r
+\r
+/* Small HirePool avatar beside the assistant's messages (once per run of messages) */\r
+.ai-theme-hirepool .ai-message-row.assistant::before {\r
+  content: '';\r
+  position: absolute;\r
+  left: 0;\r
+  top: 0;\r
+  width: 22px;\r
+  height: 22px;\r
+  border-radius: 50%;\r
+  background: #0b0b0b url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23a3e635' d='M7 3H21V17L16.5 12.5L7 22L2 17L11.5 7.5Z'/%3E%3C/svg%3E") center / 12px 12px no-repeat;\r
+  box-shadow: 0 0 0 1.5px #a3e635;\r
+}\r
+\r
+.ai-theme-hirepool .ai-message-row.assistant + .ai-message-row.assistant::before { visibility: hidden; }\r
+\r
+.ai-theme-hirepool .ai-message-row.assistant > .ai-bubble {\r
+  align-self: flex-start;\r
+  max-width: 88%;\r
+  background: #ffffff;\r
+  border: 1px solid #e3e8ee;\r
+  border-radius: 16px 16px 16px 4px;\r
+  padding: 10px 13px;\r
+  box-shadow: 0 1px 2px rgba(15, 23, 32, 0.04);\r
+}\r
+\r
+.ai-theme-hirepool .ai-message-row.user {\r
+  max-width: 82%;\r
+}\r
+\r
+.ai-theme-hirepool .ai-message-row.user .ai-bubble {\r
+  background: #a3e635;\r
+  color: #0f1720;\r
+  border-radius: 16px 16px 4px 16px;\r
+  padding: 8px 13px;\r
+  font-weight: 500;\r
+}\r
+\r
+.ai-theme-hirepool .ai-bubble ul,\r
+.ai-theme-hirepool .ai-bubble ol {\r
+  margin: 6px 0;\r
+  padding-left: 18px;\r
+}\r
+\r
+.ai-theme-hirepool .ai-bubble li { margin: 3px 0; }\r
+\r
+.ai-theme-hirepool .ai-bubble li p,\r
+.ai-theme-hirepool .ai-bubble li p:last-child { margin: 0; }\r
+\r
+/* Keep the header on one line next to the account pills */\r
+.ai-theme-hirepool .ai-header-info { min-width: 0; flex: 1; }\r
+\r
+.ai-theme-hirepool .ai-header-titles { min-width: 0; }\r
+\r
+.ai-theme-hirepool .ai-title {\r
+  white-space: nowrap;\r
+  overflow: hidden;\r
+  text-overflow: ellipsis;\r
+}\r
+\r
+.ai-theme-hirepool .ai-header-actions { flex-shrink: 0; }\r
+.ai-theme-hirepool .ai-bubble p { margin: 0 0 6px; }\r
+\r
+.ai-theme-hirepool .ai-bubble p:last-child { margin-bottom: 0; }\r
+\r
+.ai-theme-hirepool .ai-role-cards { margin-top: 0; }\r
+\r
+.ai-theme-hirepool .ai-quick-replies { margin-top: 0; }\r
+\r
+.ai-theme-hirepool .ai-quick-replies { gap: 8px; }\r
+\r
+/* Website: clearly visible secondary buttons under the cards */\r
+.ai-theme-hirepool .ai-quick-reply {\r
+  background: #ffffff;\r
+  border: 1.5px solid var(--ai-primary);\r
+  border-radius: 999px;\r
+  padding: 9px 16px;\r
+  font-size: 13.5px;\r
+  font-weight: 600;\r
+  color: #1f2933;\r
+  min-height: 38px;\r
+}\r
+\r
+.ai-theme-hirepool .ai-quick-reply:hover {\r
+  background: var(--ai-primary);\r
+  color: #0f1720;\r
+}\r
+\r
+/* Welcome bubble uses the full width above the cards */\r
+.ai-theme-hirepool .ai-message-row.assistant:has(.ai-role-cards) > .ai-bubble {\r
+  max-width: 100%;\r
+}\r
+\r
+.ai-msg-meta {\r
+  font-size: 11px;\r
+  color: #8a96a3;\r
+  margin-top: 4px;\r
+  padding-left: 2px;\r
+}\r
+\r
+.ai-theme-hirepool .ai-msg-meta { margin-top: -4px; }\r
+\r
+@media (prefers-reduced-motion: reduce) {\r
+  .ai-role-card { transition: none; }\r
+}\r
+\r
+/* Quick replies under the latest assistant message */\r
+.ai-quick-replies {\r
+  display: flex;\r
+  flex-wrap: wrap;\r
+  gap: 6px;\r
+  margin-top: 8px;\r
+}\r
+\r
+.ai-quick-reply {\r
+  background: var(--ai-bg);\r
+  border: 1px solid var(--ai-primary);\r
+  border-radius: 14px;\r
+  padding: 6px 12px;\r
+  font-size: 12.5px;\r
+  line-height: 1.3;\r
+  color: var(--ai-text);\r
+  cursor: pointer;\r
+  text-align: left;\r
+  transition: background-color 0.15s ease, color 0.15s ease;\r
+}\r
+\r
+.ai-quick-reply:hover {\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+}\r
+\r
+.ai-quick-reply:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+  outline-offset: 2px;\r
+}\r
+\r
+@media (prefers-reduced-motion: reduce) {\r
+  .ai-quick-reply { transition: none; }\r
+}\r
+\r
+/* Friendly error notices */\r
+.ai-error-banner {\r
+  line-height: 1.45;\r
+}\r
+\r
+.ai-error-retry-btn:disabled {\r
+  opacity: 0.5;\r
+  cursor: not-allowed;\r
+}\r
+\r
+.ai-error-login-link {\r
+  flex-shrink: 0;\r
+  padding: 4px 10px;\r
+  border-radius: var(--ai-radius-sm);\r
+  background: var(--ai-primary);\r
+  color: var(--ai-primary-contrast);\r
+  font-weight: 600;\r
+  text-decoration: none;\r
+}\r
+\r
+.ai-error-login-link:focus-visible {\r
+  outline: 2px solid var(--ai-primary);\r
+  outline-offset: 2px;\r
+}\r
 
-*, *::before, *::after {
-  box-sizing: border-box;
-}
-
-.ai-widget-container {
-  --ai-primary: #a3e635;
-  --ai-primary-hover: #8ee055;
-  --ai-primary-contrast: #030712;
-  --ai-bg: #ffffff;
-  --ai-surface: #f8fafc;
-  --ai-surface-alt: #f1f5f9;
-  --ai-border: #e2e8f0;
-  --ai-text: #090d16;
-  --ai-text-muted: #64748b;
-  --ai-user-bubble: #a3e635;
-  --ai-user-text: #030712;
-  --ai-bot-bubble: #f1f5f9;
-  --ai-bot-text: #090d16;
-  --ai-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
-  --ai-radius: 16px;
-  --ai-radius-sm: 8px;
-
-  position: fixed;
-  z-index: 2147483647;
-  pointer-events: none;
-}
-
-/* Dark Theme overrides */
-.ai-widget-container[data-theme="dark"] {
-  --ai-bg: #030712;
-  --ai-surface: #090d16;
-  --ai-surface-alt: #0f172a;
-  --ai-border: #1e293b;
-  --ai-text: #f8fafc;
-  --ai-text-muted: #94a3b8;
-  --ai-user-bubble: #a3e635;
-  --ai-user-text: #030712;
-  --ai-bot-bubble: #0f172a;
-  --ai-bot-text: #f8fafc;
-  --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);
-}
-
-/* Auto Theme Media Query */
-@media (prefers-color-scheme: dark) {
-  .ai-widget-container[data-theme="auto"] {
-    --ai-bg: #030712;
-    --ai-surface: #090d16;
-    --ai-surface-alt: #0f172a;
-    --ai-border: #1e293b;
-    --ai-text: #f8fafc;
-    --ai-text-muted: #94a3b8;
-    --ai-user-bubble: #a3e635;
-    --ai-user-text: #030712;
-    --ai-bot-bubble: #0f172a;
-    --ai-bot-text: #f8fafc;
-    --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);
-  }
-}
-
-/* Launcher Positions */
-.pos-bottom-right { bottom: 20px; right: 20px; }
-.pos-bottom-left { bottom: 20px; left: 20px; }
-.pos-top-right { top: 20px; right: 20px; }
-.pos-top-left { top: 20px; left: 20px; }
-
-/* Floating Launcher Button */
-.ai-launcher-btn {
-  pointer-events: auto;
-  position: relative;
-  width: 56px;
-  height: 56px;
-  border-radius: 50%;
-  background: linear-gradient(135deg, #a3e635, #10b981);
-  color: #030712;
-  border: 1px solid rgba(163, 230, 53, 0.4);
-  cursor: pointer;
-  box-shadow: 0 4px 18px rgba(163, 230, 53, 0.35), 0 6px 20px rgba(0, 0, 0, 0.3);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease;
-  outline: none;
-}
-
-.ai-launcher-btn:hover {
-  transform: scale(1.08);
-  box-shadow: 0 6px 24px rgba(163, 230, 53, 0.5), 0 8px 25px rgba(0, 0, 0, 0.35);
-}
-
-.ai-launcher-btn:active {
-  transform: scale(0.96);
-}
-
-.ai-launcher-btn:focus-visible {
-  outline: 3px solid var(--ai-primary);
-  outline-offset: 3px;
-}
-
-.ai-launcher-btn svg {
-  width: 26px;
-  height: 26px;
-  fill: currentColor;
-  transition: transform 0.25s ease, opacity 0.2s ease;
-}
-
-.ai-launcher-btn .icon-close {
-  display: none;
-}
-
-.ai-widget-container.is-open .ai-launcher-btn .icon-chat {
-  display: none;
-}
-
-.ai-widget-container.is-open .ai-launcher-btn .icon-close {
-  display: block;
-}
-
-/* Chat Panel */
-.ai-panel {
-  pointer-events: auto;
-  position: absolute;
-  width: 380px;
-  height: 560px;
-  max-width: calc(100vw - 32px);
-  max-height: calc(100vh - 100px);
-  background: var(--ai-bg);
-  border: 1px solid var(--ai-border);
-  border-radius: var(--ai-radius);
-  box-shadow: var(--ai-shadow);
-  display: flex;
-  flex-direction: column;
-  overflow: hidden;
-  opacity: 0;
-  transform: scale(0.95) translateY(10px);
-  transform-origin: bottom right;
-  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  visibility: hidden;
-}
-
-/* Position-based origins and anchors */
-.pos-bottom-right .ai-panel { bottom: 70px; right: 0; transform-origin: bottom right; }
-.pos-bottom-left .ai-panel { bottom: 70px; left: 0; transform-origin: bottom left; }
-.pos-top-right .ai-panel { top: 70px; right: 0; transform-origin: top right; }
-.pos-top-left .ai-panel { top: 70px; left: 0; transform-origin: top left; }
-
-.ai-widget-container.is-open .ai-panel {
-  opacity: 1;
-  transform: scale(1) translateY(0);
-  visibility: visible;
-}
-
-/* Header */
-.ai-header {
-  padding: 12px 16px;
-  background: var(--ai-bg);
-  border-bottom: 1px solid var(--ai-border);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  flex-shrink: 0;
-  user-select: none;
-}
-
-.ai-header-info {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.ai-avatar {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--ai-primary);
-  color: var(--ai-primary-contrast);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  font-weight: 600;
-  font-size: 14px;
-  overflow: hidden;
-  flex-shrink: 0;
-}
-
-.ai-avatar img {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-}
-
-.ai-header-titles {
-  display: flex;
-  flex-direction: column;
-}
-
-.ai-title {
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--ai-text);
-  line-height: 1.2;
-}
-
-.ai-status {
-  font-size: 11px;
-  color: var(--ai-text-muted);
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ai-status-dot {
-  width: 7px;
-  height: 7px;
-  border-radius: 50%;
-  background: #10b981;
-}
-
-.ai-status-dot.busy {
-  background: #f59e0b;
-  animation: pulse-dot 1.5s infinite;
-}
-
-@keyframes pulse-dot {
-  0%, 100% { opacity: 1; transform: scale(1); }
-  50% { opacity: 0.5; transform: scale(1.2); }
-}
-
-.ai-header-actions {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.ai-icon-btn {
-  background: transparent;
-  border: none;
-  color: var(--ai-text-muted);
-  width: 30px;
-  height: 30px;
-  border-radius: var(--ai-radius-sm);
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  transition: background-color 0.15s ease, color 0.15s ease;
-  outline: none;
-}
-
-.ai-icon-btn:hover {
-  background: var(--ai-surface-alt);
-  color: var(--ai-text);
-}
-
-.ai-icon-btn:focus-visible {
-  outline: 2px solid var(--ai-primary);
-}
-
-.ai-icon-btn svg {
-  width: 16px;
-  height: 16px;
-  fill: currentColor;
-}
-
-/* Conversation Body */
-.ai-body {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overflow-x: hidden;
-  padding: 16px;
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-  background: var(--ai-bg);
-  scroll-behavior: smooth;
-}
-
-.ai-body::-webkit-scrollbar {
-  width: 5px;
-}
-
-.ai-body::-webkit-scrollbar-thumb {
-  background: var(--ai-border);
-  border-radius: 4px;
-}
-
-/* Welcome Box */
-.ai-welcome-box {
-  background: var(--ai-surface);
-  border: 1px solid var(--ai-border);
-  border-radius: var(--ai-radius-sm);
+/* ===== HirePool theme: dashboard welcome box, reminder card, profile form ===== */
+.ai-theme-hirepool .ai-welcome-box {
+  background: #ffffff;
+  border: 1px solid #e3e8ee;
+  border-radius: 16px;
   padding: 14px;
   margin-bottom: 4px;
 }
 
-.ai-welcome-greeting {
+.ai-theme-hirepool .ai-welcome-greeting {
   font-size: 13.5px;
-  color: var(--ai-text);
-  margin-bottom: 12px;
-  line-height: 1.5;
+  line-height: 1.55;
+  color: #1f2933;
 }
 
-.ai-suggested-prompts-label {
+.ai-theme-hirepool .ai-suggested-prompts-label {
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--ai-text-muted);
-  margin-bottom: 8px;
+  letter-spacing: 0.02em;
+  color: #8a96a3;
+  margin: 12px 0 8px;
 }
 
-.ai-prompts-list {
+.ai-theme-hirepool .ai-prompts-list { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.ai-theme-hirepool .ai-prompt-pill {
+  background: #ffffff;
+  border: 1.5px solid var(--ai-primary);
+  border-radius: 999px;
+  padding: 8px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2933;
+}
+
+.ai-theme-hirepool .ai-prompt-pill:hover {
+  background: var(--ai-primary);
+  color: #0f1720;
+  transform: none;
+}
+
+.ai-theme-hirepool .ai-nudge {
+  border-left: 3px solid var(--ai-primary) !important;
+}
+
+.ai-theme-hirepool .ai-nudge .ai-action-controls { margin-top: 10px; gap: 8px; }
+
+/* Profile form card */
+.ai-theme-hirepool .ai-profile-form-row { padding-left: 0; }
+
+.ai-theme-hirepool .ai-profile-form-row::before { display: none; }
+
+.ai-theme-hirepool .ai-message-row.assistant > .ai-profile-form-card,
+.ai-profile-form-card {
+  max-width: 100%;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 14px;
+}
+
+.ai-profile-form { display: flex; flex-direction: column; gap: 12px; }
+
+.ai-pf-head { border-bottom: 1px solid #e3e8ee; padding-bottom: 10px; }
+
+.ai-pf-title { font-size: 15px; font-weight: 700; color: #0f1720; }
+
+.ai-pf-subtitle { font-size: 12.5px; color: #52606d; margin-top: 2px; line-height: 1.4; }
+
+.ai-pf-progress {
+  display: inline-block;
+  margin-left: 4px;
+  background: rgba(163, 230, 53, 0.2);
+  color: #3f6212;
+  border-radius: 999px;
+  padding: 1px 8px;
+  font-weight: 600;
+  font-size: 11.5px;
+}
+
+.ai-pf-field { display: flex; flex-direction: column; gap: 5px; }
+
+.ai-pf-label { font-size: 12.5px; font-weight: 600; color: #1f2933; }
+
+.ai-pf-missing {
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.ai-profile-form .ai-form-input {
+  width: 100%;
+  box-sizing: border-box;
+  border: 1px solid #d5dce3;
+  border-radius: 10px;
+  padding: 8px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: #1f2933;
+  background: #ffffff;
+}
+
+.ai-profile-form textarea.ai-form-input { resize: vertical; min-height: 64px; }
+
+.ai-profile-form .ai-form-input:focus {
+  outline: none;
+  border-color: var(--ai-primary);
+  box-shadow: 0 0 0 3px rgba(163, 230, 53, 0.25);
+}
+
+.ai-pf-field.has-error .ai-form-input { border-color: #dc2626; }
+
+.ai-pf-error, .ai-pf-form-error { font-size: 12px; color: #dc2626; }
+
+.ai-pf-error:empty, .ai-pf-form-error:empty { display: none; }
+
+.ai-pf-hint { font-size: 11.5px; color: #7b8794; }
+
+.ai-pf-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.ai-pf-chip { position: relative; cursor: pointer; }
+
+.ai-pf-chip input { position: absolute; opacity: 0; pointer-events: none; }
+
+.ai-pf-chip span {
+  display: inline-block;
+  border: 1px solid #d5dce3;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: #1f2933;
+  background: #ffffff;
+}
+
+.ai-pf-chip input:checked + span {
+  background: var(--ai-primary);
+  border-color: var(--ai-primary);
+  color: #0f1720;
+  font-weight: 600;
+}
+
+.ai-pf-chip input:focus-visible + span { outline: 2px solid var(--ai-primary); outline-offset: 2px; }
+
+.ai-pf-chat-sections {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
+  padding-top: 10px;
+  border-top: 1px dashed #e3e8ee;
 }
 
-.ai-prompt-pill {
-  background: var(--ai-bg);
-  border: 1px solid var(--ai-border);
-  border-radius: 14px;
-  padding: 5px 10px;
-  font-size: 12px;
-  color: var(--ai-text);
+.ai-pf-chat-sections .ai-pf-hint { width: 100%; }
+
+.ai-pf-chat-btn {
+  border: 1.5px solid var(--ai-primary);
+  background: #ffffff;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 600;
   cursor: pointer;
-  transition: all 0.15s ease;
-  text-align: left;
-  outline: none;
+  color: #1f2933;
 }
 
-.ai-prompt-pill:hover {
-  background: var(--ai-primary);
-  border-color: var(--ai-primary);
-  color: var(--ai-primary-contrast);
-  transform: translateY(-1px);
+.ai-pf-chat-btn:hover { background: var(--ai-primary); color: #0f1720; }
+
+.ai-pf-actions {
+  display: flex;
+  gap: 8px;
+  position: sticky;
+  bottom: -14px;
+  background: #ffffff;
+  padding: 8px 0 2px;
 }
 
-.ai-prompt-pill:focus-visible {
-  outline: 2px solid var(--ai-primary);
-}
+.ai-pf-actions .ai-pf-save { flex: 1; }
 
-/* Message Rows */
-.ai-message-row {
+.ai-profile-form-loading, .ai-profile-form-error { font-size: 13px; color: #52606d; }
+
+.ai-profile-form-error { color: #b91c1c; }
+
+/* Dashboard welcome: profile progress */
+.ai-profile-progress {
+  background: #ffffff;
+  border: 1px solid #e3e8ee;
+  border-left: 3px solid var(--ai-primary);
+  border-radius: 12px;
+  padding: 11px 12px;
   display: flex;
   flex-direction: column;
-  max-width: 88%;
-  min-width: 0;
-  animation: fadeInMsg 0.2s ease;
+  gap: 7px;
 }
 
-.ai-message-row.ai-signup-row {
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-}
+.ai-pp-top { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
 
-@keyframes fadeInMsg {
-  from { opacity: 0; transform: translateY(4px); }
-  to { opacity: 1; transform: translateY(0); }
-}
+.ai-pp-title { font-size: 13px; color: #1f2933; }
 
-.ai-message-row.user {
-  align-self: flex-end;
-}
+.ai-pp-title strong { font-weight: 700; }
 
-.ai-message-row.assistant {
-  align-self: flex-start;
-}
-
-.ai-bubble {
-  padding: 10px 14px;
-  border-radius: 14px;
-  font-size: 13.5px;
-  line-height: 1.55;
-  word-break: break-word;
-}
-
-.ai-message-row.user .ai-bubble {
-  background: var(--ai-user-bubble);
-  color: var(--ai-user-text);
-  border-bottom-right-radius: 4px;
-}
-
-.ai-message-row.assistant .ai-bubble {
-  background: var(--ai-bot-bubble);
-  color: var(--ai-bot-text);
-  border-bottom-left-radius: 4px;
-  border: 1px solid var(--ai-border);
-}
-
-/* Assistant Bubble Markdown elements */
-.ai-bubble p {
-  margin: 0 0 8px 0;
-}
-.ai-bubble p:last-child {
-  margin-bottom: 0;
-}
-
-.ai-bubble h2, .ai-bubble h3, .ai-bubble h4 {
-  margin: 10px 0 6px 0;
-  color: var(--ai-text);
+.ai-pp-count {
+  flex-shrink: 0;
+  font-size: 11px;
   font-weight: 600;
+  color: #b45309;
+  background: #fef3c7;
+  border-radius: 999px;
+  padding: 1px 8px;
 }
-.ai-bubble h2 { font-size: 15px; }
-.ai-bubble h3 { font-size: 14px; }
-.ai-bubble h4 { font-size: 13.5px; }
 
-.ai-bubble ul, .ai-bubble ol {
-  margin: 6px 0 8px 18px;
+.ai-pp-bar { height: 6px; border-radius: 999px; background: #edf1f5; overflow: hidden; }
+
+.ai-pp-bar span { display: block; height: 100%; background: var(--ai-primary); border-radius: inherit; transition: width 0.4s ease; }
+
+.ai-pp-missing { font-size: 12px; color: #52606d; line-height: 1.4; }
+
+.ai-pp-btn {
+  align-self: flex-start;
+  background: var(--ai-primary);
+  color: #0f1720;
+  border: none;
+  border-radius: 999px;
+  padding: 7px 14px;
+  font: inherit;
+  font-size: 12.5px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.ai-pp-btn:hover { background: #bef264; }
+
+.ai-pp-btn:focus-visible { outline: 2px solid var(--ai-primary); outline-offset: 2px; }
+
+@media (prefers-reduced-motion: reduce) { .ai-pp-bar span { transition: none; } }
+
+.ai-action-explanation p { margin: 0 0 6px; }
+.ai-action-explanation p:last-child { margin-bottom: 0; }
+
+/* Profile form: values taken from an uploaded resume */
+.ai-pf-source {
+  margin-left: 6px;
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #3f6212;
+  background: rgba(163, 230, 53, 0.22);
+  border-radius: 999px;
+  padding: 1px 6px;
+}
+
+.ai-pf-diff { display: flex; flex-wrap: wrap; align-items: center; gap: 4px; }
+
+.ai-pf-use {
+  border: none;
+  background: none;
+  color: #3f6212;
+  font: inherit;
+  font-weight: 700;
+  text-decoration: underline;
+  cursor: pointer;
   padding: 0;
 }
 
-.ai-bubble li {
-  margin-bottom: 4px;
-}
+/* Agency: resumes read from an upload */
+.ai-bench-card { display: flex; flex-direction: column; gap: 10px; }
 
-.ai-bubble blockquote {
-  margin: 8px 0;
-  padding: 4px 10px;
-  border-left: 3px solid var(--ai-primary);
-  background: var(--ai-surface);
-  color: var(--ai-text-muted);
-  font-style: italic;
-}
+.ai-bench-list { display: flex; flex-direction: column; gap: 6px; }
 
-.ai-bubble a {
-  color: var(--ai-primary);
-  text-decoration: underline;
-}
-
-.ai-bubble code.inline-code {
-  background: rgba(0, 0, 0, 0.08);
-  padding: 2px 5px;
-  border-radius: 4px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: 12px;
-}
-
-[data-theme="dark"] .ai-bubble code.inline-code {
-  background: rgba(255, 255, 255, 0.12);
-}
-
-/* Code block container */
-.code-block-wrapper {
-  margin: 8px 0;
-  border-radius: 6px;
-  overflow: hidden;
-  background: #1e1e24;
-  color: #f8f8f2;
-  font-size: 12px;
-}
-
-.code-header {
-  display: flex;
-  justify-content: space-between;
-  align-items: center;
-  padding: 4px 10px;
-  background: #282a36;
-  color: #a0a0a0;
-  font-size: 11px;
-}
-
-.code-lang {
-  text-transform: uppercase;
-  font-weight: 600;
-}
-
-.copy-code-btn {
-  background: transparent;
-  border: 1px solid #44475a;
-  color: #f8f8f2;
-  border-radius: 4px;
-  padding: 2px 6px;
-  font-size: 10px;
-  cursor: pointer;
-}
-
-.copy-code-btn:hover {
-  background: #44475a;
-}
-
-.code-block-wrapper pre {
-  margin: 0;
-  padding: 10px;
-  overflow-x: auto;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-}
-
-/* Message Meta & Action Bar */
-.ai-message-actions {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 4px;
-  font-size: 11px;
-  color: var(--ai-text-muted);
-}
-
-.ai-msg-action-btn {
-  background: transparent;
-  border: none;
-  color: var(--ai-text-muted);
-  font-size: 11px;
-  cursor: pointer;
-  display: inline-flex;
-  align-items: center;
-  gap: 3px;
-  padding: 2px 6px;
-  border-radius: 4px;
-  transition: all 0.15s ease;
-  outline: none;
-}
-
-.ai-msg-action-btn:hover {
-  background: var(--ai-surface-alt);
-  color: var(--ai-text);
-}
-
-.ai-msg-action-btn:focus-visible {
-  outline: 2px solid var(--ai-primary);
-}
-
-/* Typing / Streaming Indicator */
-.ai-streaming-indicator {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  padding: 8px 12px;
-  border-radius: 12px;
-  background: var(--ai-bot-bubble);
-  border: 1px solid var(--ai-border);
-  width: fit-content;
-  align-self: flex-start;
-}
-
-.ai-typing-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: var(--ai-text-muted);
-  animation: typingBounce 1.4s infinite ease-in-out both;
-}
-
-.ai-typing-dot:nth-child(1) { animation-delay: -0.32s; }
-.ai-typing-dot:nth-child(2) { animation-delay: -0.16s; }
-
-@keyframes typingBounce {
-  0%, 80%, 100% { transform: scale(0); opacity: 0.4; }
-  40% { transform: scale(1); opacity: 1; }
-}
-
-/* Error Banner */
-.ai-error-banner {
-  background: #fef2f2;
-  border: 1px solid #fecaca;
-  color: #991b1b;
-  border-radius: var(--ai-radius-sm);
-  padding: 8px 12px;
-  font-size: 12px;
+.ai-bench-row {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin: 4px 0;
-}
-
-[data-theme="dark"] .ai-error-banner {
-  background: #450a0a;
-  border-color: #7f1d1d;
-  color: #fca5a5;
-}
-
-.ai-error-retry-btn {
-  background: #dc2626;
-  color: white;
-  border: none;
-  padding: 3px 8px;
-  border-radius: 4px;
-  font-size: 11px;
-  font-weight: 500;
-  cursor: pointer;
-}
-
-/* Footer / Input Area */
-.ai-footer {
-  padding: 12px 14px;
-  background: var(--ai-bg);
-  border-top: 1px solid var(--ai-border);
-  flex-shrink: 0;
-}
-
-.ai-input-form {
-  display: flex;
-  align-items: flex-end;
-  gap: 8px;
-  background: var(--ai-surface);
-  border: 1px solid var(--ai-border);
-  border-radius: 18px;
-  padding: 4px 6px 4px 12px;
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;
-}
-
-.ai-input-form:focus-within {
-  border-color: var(--ai-primary);
-  box-shadow: 0 0 0 2px rgba(163, 230, 53, 0.25);
-}
-
-.ai-textarea {
-  flex: 1;
-  background: transparent;
-  border: none;
-  outline: none;
-  resize: none;
-  padding: 6px 0;
-  max-height: 120px;
-  min-height: 24px;
-  font-family: inherit;
-  font-size: 13.5px;
-  line-height: 1.4;
-  color: var(--ai-text);
-}
-
-.ai-textarea::placeholder {
-  color: var(--ai-text-muted);
-}
-
-.ai-send-btn, .ai-stop-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: var(--ai-primary);
-  color: var(--ai-primary-contrast);
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: background-color 0.15s ease, transform 0.1s ease;
-  outline: none;
-}
-
-.ai-send-btn:hover, .ai-stop-btn:hover {
-  background: var(--ai-primary-hover);
-}
-
-.ai-send-btn:disabled {
-  background: var(--ai-border);
-  color: var(--ai-text-muted);
-  cursor: not-allowed;
-}
-
-.ai-stop-btn {
-  background: #ef4444;
-}
-
-.ai-stop-btn:hover {
-  background: #dc2626;
-}
-
-.ai-send-btn svg, .ai-stop-btn svg {
-  width: 15px;
-  height: 15px;
-  fill: currentColor;
-}
-
-.ai-footer-note {
-  font-size: 10.5px;
-  color: var(--ai-text-muted);
-  text-align: center;
-  margin-top: 6px;
-}
-
-/* Reduced Motion */
-@media (prefers-reduced-motion: reduce) {
-  .ai-launcher-btn, .ai-panel, .ai-message-row, .ai-prompt-pill {
-    transition: none !important;
-    animation: none !important;
-  }
-}
-
-/* Mobile & Small Screen Adaptability */
-@media (max-width: 640px) {
-  .ai-panel {
-    width: 100vw !important;
-    height: 100% !important;
-    max-width: 100vw !important;
-    max-height: 100vh !important;
-    top: 0 !important;
-    left: 0 !important;
-    right: 0 !important;
-    bottom: 0 !important;
-    border-radius: 0 !important;
-    position: fixed !important;
-  }
-
-  .pos-bottom-right, .pos-bottom-left, .pos-top-right, .pos-top-left {
-    bottom: 16px;
-    right: 16px;
-    left: auto;
-    top: auto;
-  }
-}
-
-@media (max-width: 480px) {
-  .ai-body {
-    padding: 12px;
-  }
-
-  .ai-form-row {
-    grid-template-columns: minmax(0, 1fr);
-  }
-}
-
-/* Action Proposal Card */
-.ai-action-card {
-  margin-top: 10px;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-  background: var(--ai-surface);
-  border: 1px solid var(--ai-border);
-  border-radius: var(--ai-radius-sm);
-  padding: 12px;
-  font-size: 12.5px;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-[data-theme="dark"] .ai-action-card {
-  background: rgba(255, 255, 255, 0.04);
-  border-color: rgba(255, 255, 255, 0.12);
-}
-
-.ai-action-header {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
-
-.ai-action-badge {
-  background: rgba(79, 70, 229, 0.12);
-  color: var(--ai-primary);
-  font-size: 10.5px;
-  font-weight: 600;
-  padding: 2px 7px;
+  border: 1px solid #e3e8ee;
   border-radius: 10px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+  padding: 7px 9px;
+  background: #ffffff;
 }
 
-[data-theme="dark"] .ai-action-badge {
-  background: rgba(99, 102, 241, 0.25);
-  color: #818cf8;
-}
+.ai-bench-who { display: flex; flex-direction: column; min-width: 0; font-size: 12.5px; }
 
-.ai-action-title {
-  font-weight: 600;
-  color: var(--ai-text);
-  font-size: 13px;
-  flex: 1;
-}
-
-.ai-action-explanation {
-  margin: 0;
-  color: var(--ai-text-muted);
-  line-height: 1.4;
-  font-size: 12px;
-}
-
-.ai-action-details {
-  background: var(--ai-bg);
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  padding: 8px 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-
-[data-theme="dark"] .ai-action-details {
-  background: rgba(0, 0, 0, 0.2);
-}
-
-.ai-action-param-row {
-  display: flex;
-  gap: 8px;
+.ai-bench-who span {
+  color: #7b8794;
   font-size: 11.5px;
-}
-
-.ai-action-param-key {
-  font-weight: 500;
-  color: var(--ai-text-muted);
-  min-width: 80px;
-  flex-shrink: 0;
-}
-
-.ai-action-param-val {
-  color: var(--ai-text);
-  word-break: break-word;
-  font-weight: 500;
-}
-
-.ai-action-risk {
-  border-radius: 999px;
-  font-size: 10px;
-  font-weight: 600;
-  padding: 2px 7px;
-  text-transform: uppercase;
-}
-
-.ai-action-risk.risk-read {
-  background: rgba(16, 185, 129, 0.12);
-  color: #047857;
-}
-
-.ai-action-risk.risk-write {
-  background: rgba(79, 70, 229, 0.12);
-  color: var(--ai-primary);
-}
-
-.ai-action-risk.risk-destructive {
-  background: rgba(220, 38, 38, 0.12);
-  color: #b91c1c;
-}
-
-.ai-action-acknowledgement {
-  align-items: flex-start;
-  color: var(--ai-text-muted);
-  display: flex;
-  font-size: 11px;
-  gap: 7px;
-  line-height: 1.4;
-}
-
-.ai-action-acknowledgement input {
-  margin: 1px 0 0;
-}
-
-.ai-action-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  margin-top: 4px;
-  width: 100%;
-  min-width: 0;
-}
-
-.ai-btn-action-confirm, .ai-btn-action-cancel {
-  border-radius: 6px;
-  font-size: 12px;
-  font-weight: 500;
-  padding: 6px 12px;
-  cursor: pointer;
-  border: 1px solid transparent;
-  transition: all 0.15s ease;
-  min-width: 0;
-  white-space: normal;
-  text-align: center;
-}
-
-.ai-btn-action-confirm {
-  background: var(--ai-primary);
-  color: var(--ai-primary-contrast);
-  flex: 1;
-}
-
-.ai-btn-action-confirm:hover:not(:disabled) {
-  background: var(--ai-primary-hover);
-}
-
-.ai-btn-action-confirm:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
-.ai-btn-action-cancel {
-  background: transparent;
-  border-color: var(--ai-border);
-  color: var(--ai-text-muted);
-}
-
-.ai-btn-action-cancel:hover:not(:disabled) {
-  background: var(--ai-bg);
-  color: var(--ai-text);
-}
-
-.ai-action-status-msg {
-  border-radius: 6px;
-  padding: 6px 10px;
-  font-size: 11.5px;
-  font-weight: 500;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.ai-action-status-msg.executing {
-  background: #eff6ff;
-  color: #1d4ed8;
-  border: 1px solid #bfdbfe;
-}
-
-.ai-action-status-msg.success {
-  background: #f0fdf4;
-  color: #15803d;
-  border: 1px solid #bbf7d0;
-}
-
-.ai-action-status-msg.error {
-  background: #fef2f2;
-  color: #b91c1c;
-  border: 1px solid #fecaca;
-}
-
-.ai-action-status-msg.cancelled {
-  background: var(--ai-bg);
-  color: var(--ai-text-muted);
-  border: 1px solid var(--ai-border);
-}
-
-[data-theme="dark"] .ai-action-status-msg.executing {
-  background: #1e3a8a;
-  color: #93c5fd;
-  border-color: #2563eb;
-}
-
-[data-theme="dark"] .ai-action-status-msg.success {
-  background: #14532d;
-  color: #86efac;
-  border-color: #16a34a;
-}
-
-[data-theme="dark"] .ai-action-status-msg.error {
-  background: #7f1d1d;
-  color: #fca5a5;
-  border-color: #dc2626;
-}
-
-/* Document Attachment Button */
-.ai-attach-btn {
-  width: 32px;
-  height: 32px;
-  border-radius: 50%;
-  background: transparent;
-  color: var(--ai-text-muted);
-  border: none;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  cursor: pointer;
-  flex-shrink: 0;
-  transition: all 0.15s ease;
-  outline: none;
-  margin-right: 4px;
-}
-.ai-attach-btn:hover {
-  background: var(--ai-bg);
-  color: var(--ai-primary);
-}
-.ai-attach-btn svg {
-  width: 17px;
-  height: 17px;
-  fill: currentColor;
-}
-
-.ai-processing-state {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px;
-  font-size: 12.5px;
-  color: var(--ai-text);
-}
-.ai-document-consent {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  background: var(--ai-surface);
-  border: 1px solid var(--ai-border);
-  border-radius: 8px;
-}
-.ai-document-consent h3,
-.ai-document-consent p {
-  margin: 0;
-}
-.ai-document-consent h3 {
-  font-size: 14px;
-  color: var(--ai-text);
-}
-.ai-document-consent p,
-.ai-document-consent-choice {
-  font-size: 12px;
-  color: var(--ai-text);
-}
-.ai-document-consent-choice {
-  display: flex;
-  align-items: flex-start;
-  gap: 8px;
-  cursor: pointer;
-}
-.ai-document-consent-choice input {
-  flex: 0 0 auto;
-  margin-top: 3px;
-}
-.ai-document-consent-controls {
-  display: flex;
-  gap: 8px;
-}
-.ai-document-consent-controls button,
-.ai-btn-document-cancel,
-.ai-btn-document-remove {
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  color: var(--ai-text);
-  background: var(--ai-bg);
-  font: inherit;
-  cursor: pointer;
-}
-.ai-document-consent-controls .ai-btn-document-consent-accept {
-  border-color: var(--ai-primary);
-  background: var(--ai-primary);
-  color: var(--ai-primary-contrast);
-}
-.ai-document-consent-controls button:disabled,
-.ai-btn-document-cancel:disabled,
-.ai-btn-document-remove:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.ai-document-cancelled {
-  color: var(--ai-text-muted);
-}
-.ai-hirepool-resume-card {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  padding: 12px;
-  background: var(--ai-surface);
-  border: 1px solid var(--ai-border);
-  border-radius: 8px;
-}
-.ai-hirepool-resume-card strong,
-.ai-hirepool-resume-card p {
-  margin: 0;
-  overflow-wrap: anywhere;
-}
-.ai-hirepool-resume-card strong {
-  color: var(--ai-text);
-  font-size: 13px;
-}
-.ai-hirepool-resume-card p {
-  color: var(--ai-text-muted);
-  font-size: 12px;
-}
-.ai-hirepool-resume-controls {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-}
-.ai-hirepool-resume-card button {
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  padding: 6px 10px;
-  color: var(--ai-text);
-  background: var(--ai-bg);
-  font: inherit;
-  cursor: pointer;
-}
-.ai-hirepool-resume-card .ai-btn-resume-confirm,
-.ai-hirepool-resume-card .ai-btn-resume-prepare {
-  border-color: var(--ai-primary);
-  background: var(--ai-primary);
-  color: var(--ai-primary-contrast);
-}
-.ai-hirepool-resume-card button:disabled,
-.ai-attach-btn:disabled {
-  opacity: 0.55;
-  cursor: not-allowed;
-}
-.ai-spinner {
-  width: 16px;
-  height: 16px;
-  border: 2px solid rgba(79, 70, 229, 0.2);
-  border-top-color: var(--ai-primary);
-  border-radius: 50%;
-  animation: ai-spin 0.8s linear infinite;
-}
-@keyframes ai-spin {
-  to { transform: rotate(360deg); }
-}
-
-/* Generic Document Attachment Card */
-.ai-doc-card {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  background: var(--ai-surface);
-  border: 1px solid var(--ai-border);
-  border-radius: 8px;
-  padding: 10px 12px;
-  margin: 4px 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
-}
-.ai-doc-header {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-.ai-doc-icon {
-  font-size: 22px;
-  line-height: 1;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-}
-.ai-doc-details {
-  flex: 1;
-  min-width: 0;
-}
-.ai-doc-title {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ai-text);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
 }
-.ai-doc-meta {
-  font-size: 11px;
-  color: var(--ai-text-muted);
-  margin-top: 2px;
-}
-.ai-doc-badge {
-  font-size: 10.5px;
-  font-weight: 500;
-  color: #059669;
-  background: rgba(16, 185, 129, 0.12);
-  padding: 3px 8px;
-  border-radius: 12px;
-  white-space: nowrap;
-}
-[data-theme="dark"] .ai-doc-badge {
-  color: #34d399;
-  background: rgba(16, 185, 129, 0.22);
-}
-.ai-doc-hint {
-  font-size: 12px;
-  color: var(--ai-text);
-  line-height: 1.4;
-  margin: 0;
-}
 
-/* In-Chat Signup & Onboarding Styles */
-.ai-signup-card {
-  border-left: 3px solid #16a34a;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-}
-.ai-signup-role-options {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  margin: 8px 0;
-}
-.ai-role-btn {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  padding: 10px 12px;
-  border: 1px solid var(--ai-border);
-  border-radius: 8px;
-  background: var(--ai-bg);
-  cursor: pointer;
-  transition: all 0.2s ease;
-  text-align: left;
-}
-.ai-role-btn:hover {
-  border-color: #16a34a;
-  background: rgba(22, 163, 74, 0.05);
-}
-.ai-role-badge {
-  font-size: 10.5px;
-  font-weight: 600;
-  color: #16a34a;
-  text-transform: uppercase;
-  margin-bottom: 2px;
-}
-.ai-role-title {
-  font-size: 13.5px;
-  font-weight: 600;
-  color: var(--ai-text);
-}
-.ai-role-desc {
-  font-size: 11.5px;
-  color: var(--ai-text-muted);
-  margin-top: 2px;
-}
-.ai-signup-form,
-.ai-profile-form,
-.ai-login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  margin-top: 8px;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-
-.ai-login-card {
-  border-left: 3px solid #2563eb;
-  width: 100%;
-  max-width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-}
-
-.ai-login-secondary {
-  margin-top: 8px;
-  text-align: center;
-  width: 100%;
-}
-
-.ai-link-button {
-  background: none;
-  border: none;
-  color: #2563eb;
-  text-decoration: underline;
-  font-size: 11.5px;
-  cursor: pointer;
-  padding: 4px 6px;
-  font-family: inherit;
-  transition: color 0.15s ease;
-}
-
-.ai-link-button:hover {
-  color: #1d4ed8;
-}
-
-[data-theme="dark"] .ai-link-button {
-  color: #60a5fa;
-}
-
-[data-theme="dark"] .ai-link-button:hover {
-  color: #93c5fd;
-}
-.ai-form-row {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px;
-  align-items: start;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-.ai-form-group {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  box-sizing: border-box;
-}
-.ai-form-label {
-  font-size: 11.5px;
-  font-weight: 500;
-  color: var(--ai-text);
-  line-height: 1.35;
-  overflow-wrap: break-word;
-  word-wrap: break-word;
-  min-width: 0;
-}
-.ai-form-input {
-  box-sizing: border-box;
-  width: 100%;
-  min-width: 0;
-  max-width: 100%;
-  margin: 0;
-  padding: 7px 10px;
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  font-size: 12.5px;
-  background: var(--ai-bg);
-  color: var(--ai-text);
-  outline: none;
-  font-family: inherit;
-}
-.ai-form-input:focus {
-  border-color: #16a34a;
-  box-shadow: 0 0 0 1px #16a34a;
-}
-.ai-password-wrapper {
-  position: relative;
-  display: flex;
-  align-items: center;
-}
-.ai-password-wrapper .ai-form-input {
-  width: 100%;
-  padding-right: 32px;
-}
-.ai-password-toggle {
-  position: absolute;
-  right: 8px;
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 14px;
-  color: var(--ai-text-muted);
-  padding: 2px;
-}
-.ai-form-input.ai-input-invalid {
-  border-color: #dc2626 !important;
-  background-color: #fef2f2 !important;
-}
-.ai-field-error {
-  color: #dc2626;
-  font-size: 11px;
-  margin-top: 2px;
-  line-height: 1.3;
-}
-
-/* Structured Action Review Cards & Tables */
-.ai-review-card-content {
-  margin: 8px 0;
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.ai-review-table {
-  width: 100%;
-  border-collapse: collapse;
-  font-size: 12px;
-  background: var(--ai-bg);
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  overflow: hidden;
-}
-.ai-review-table tr {
-  border-bottom: 1px solid var(--ai-border);
-}
-.ai-review-table tr:last-child {
-  border-bottom: none;
-}
-.ai-review-key {
-  text-align: left;
-  padding: 6px 10px;
-  width: 38%;
-  font-weight: 600;
-  color: var(--ai-text-muted);
-  background: rgba(0, 0, 0, 0.02);
-  vertical-align: top;
-}
-.ai-review-val {
-  padding: 6px 10px;
-  color: var(--ai-text);
-  font-weight: 500;
-  vertical-align: top;
-}
-.ai-review-section {
-  display: flex;
-  flex-direction: column;
-  gap: 4px;
-}
-.ai-review-section-title {
+.ai-bench-chip {
+  flex-shrink: 0;
+  max-width: 45%;
   font-size: 11px;
   font-weight: 600;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
-  color: var(--ai-text-muted);
-}
-.ai-review-tags {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px;
-}
-.ai-review-tag {
-  display: inline-block;
+  border-radius: 999px;
   padding: 2px 8px;
-  border-radius: 12px;
-  font-size: 11px;
-  font-weight: 500;
-  background: #e0f2fe;
-  color: #0369a1;
-  border: 1px solid #bae6fd;
+  background: #edf1f5;
+  color: #52606d;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-.ai-review-tag.preferred {
-  background: #f1f5f9;
-  color: #475569;
-  border-color: #cbd5e1;
-}
-.ai-review-desc {
-  font-size: 11.5px;
-  line-height: 1.4;
-  color: var(--ai-text);
-  padding: 6px 8px;
-  background: var(--ai-bg);
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  max-height: 120px;
-  overflow-y: auto;
-  white-space: pre-wrap;
-}
-.ai-btn-action-edit {
-  background: transparent;
-  color: var(--ai-text);
-  border: 1px solid var(--ai-border);
-  border-radius: 6px;
-  padding: 6px 12px;
-  font-size: 12px;
-  cursor: pointer;
-  transition: all 0.15s ease;
-}
-.ai-btn-action-edit:hover {
-  background: rgba(0, 0, 0, 0.05);
-  border-color: var(--ai-text-muted);
-}
-.ai-verification-body {
-  padding: 4px 0;
-  width: 100%;
-  min-width: 0;
-  box-sizing: border-box;
-}
-.ai-role-btn {
-  width: 100%;
-  box-sizing: border-box;
-}`;
+
+.ai-bench-chip.ok { background: rgba(163, 230, 53, 0.22); color: #3f6212; }
+.ai-bench-chip.warn { background: #fef3c7; color: #b45309; }
+.ai-bench-chip.err { background: #fee2e2; color: #b91c1c; }
+
+.ai-bench-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.ai-bench-review { display: flex; flex-wrap: wrap; gap: 6px; }
+
+.ai-bench-review .ai-profile-form { width: 100%; }
+`;
+
+  // widget/src/hirepool-app-session.js
+  var REFRESH_MARGIN_MS = 30 * 1e3;
+  var MAX_TOKEN_LENGTH = 8192;
+  var HIREPOOL_APP_APPLICATION_ID = "hirepool-local-app";
+  var HirePoolAppSession = class {
+    /**
+     * @param {object} options
+     * @param {string} options.apiUrl SDK backend origin ('' for same origin)
+     * @param {() => (string|null|Promise<string|null>)} options.getAccessToken
+     * @param {typeof fetch} [options.fetchImpl]
+     */
+    constructor({ apiUrl = "", getAccessToken, fetchImpl } = {}) {
+      if (typeof getAccessToken !== "function") {
+        throw new TypeError("hirePoolApp.getAccessToken must be a function that returns the signed-in user's access token");
+      }
+      this.apiUrl = String(apiUrl || "").replace(/\/+$/, "");
+      this.getAccessToken = getAccessToken;
+      this.fetchImpl = fetchImpl || ((...args) => globalThis.fetch(...args));
+      this.session = null;
+      this.expiresAt = 0;
+      this.pending = null;
+      this.ended = false;
+      this.exchangedToken = null;
+    }
+    get identity() {
+      return this.session?.identity || null;
+    }
+    get role() {
+      return this.session?.identity?.userType || this.session?.identity?.user_type || null;
+    }
+    async _readAccessToken() {
+      const token = await this.getAccessToken();
+      if (typeof token !== "string" || !token.trim() || token.length > MAX_TOKEN_LENGTH) return null;
+      return token.trim();
+    }
+    async _exchange() {
+      const accessToken = await this._readAccessToken();
+      if (!accessToken) {
+        this.session = null;
+        this.expiresAt = 0;
+        return null;
+      }
+      const response = await this.fetchImpl(`${this.apiUrl}/api/hirepool/session`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${accessToken}` },
+        body: "{}",
+        credentials: "omit",
+        cache: "no-store"
+      });
+      let body = null;
+      try {
+        body = await response.json();
+      } catch {
+      }
+      if (!response.ok || typeof body?.credential !== "string") {
+        this.session = null;
+        this.expiresAt = 0;
+        const error = new Error(body?.error?.message || `HirePool sign-in could not be verified (HTTP ${response.status})`);
+        error.status = response.status;
+        throw error;
+      }
+      const ttl = Number(body.expiresIn);
+      this.exchangedToken = accessToken;
+      this.session = body;
+      this.expiresAt = Date.now() + (Number.isFinite(ttl) && ttl > 0 ? ttl : 5 * 60 * 1e3);
+      return body;
+    }
+    /** A valid assistant credential, exchanging or renewing when needed. */
+    async getSession() {
+      if (this.ended) return null;
+      const currentToken = await this._readAccessToken();
+      if (currentToken !== this.exchangedToken) {
+        this.invalidate();
+        if (!currentToken) return null;
+      }
+      if (this.session && Date.now() < this.expiresAt - REFRESH_MARGIN_MS) return this.session;
+      if (!this.pending) {
+        this.pending = this._exchange().finally(() => {
+          this.pending = null;
+        });
+      }
+      return this.pending;
+    }
+    /** Force a fresh exchange, e.g. after the app refreshed its token or a 401. */
+    invalidate() {
+      this.session = null;
+      this.expiresAt = 0;
+      this.exchangedToken = null;
+    }
+    /** Revoke the assistant credential (used when the user logs out of the app). */
+    async end() {
+      const credential = this.session?.credential;
+      this.ended = true;
+      this.invalidate();
+      if (!credential) return;
+      try {
+        await this.fetchImpl(`${this.apiUrl}/api/hirepool/session/revoke`, {
+          method: "POST",
+          headers: { Authorization: `Bearer ${credential}` },
+          credentials: "omit",
+          cache: "no-store",
+          keepalive: true
+        });
+      } catch {
+      }
+    }
+    getHostIntegrationConfig(sdk) {
+      return {
+        version: 1,
+        application: { id: HIREPOOL_APP_APPLICATION_ID, name: "HirePool" },
+        getAuthHeaders: async () => {
+          const session = await this.getSession().catch(() => null);
+          return session?.credential ? { Authorization: `Bearer ${session.credential}` } : {};
+        },
+        getSessionScope: async () => {
+          const session = await this.getSession().catch(() => null);
+          return session?.sessionScope || null;
+        },
+        getIdentity: async () => {
+          const identity = this.identity;
+          if (!identity?.id) return null;
+          return {
+            id: String(identity.id),
+            user_type: identity.userType || identity.user_type || null,
+            role: identity.organizationRole || null
+          };
+        },
+        executeAction: async ({ confirmationToken }) => {
+          if (!confirmationToken || !/^[A-Za-z0-9_-]{43}$/.test(confirmationToken)) {
+            throw new Error("This action has no valid server confirmation. Ask the assistant to prepare it again.");
+          }
+          try {
+            return await sdk.apiClient.confirmDynamicApiAction(confirmationToken);
+          } catch (error) {
+            if (error?.status === 401) this.invalidate();
+            throw error;
+          }
+        },
+        cancelHostAction: async ({ confirmationToken }) => {
+          if (!confirmationToken || !/^[A-Za-z0-9_-]{43}$/.test(confirmationToken)) {
+            throw new Error("This action has no valid server confirmation to cancel.");
+          }
+          return sdk.apiClient.cancelDynamicApiAction(confirmationToken);
+        }
+      };
+    }
+  };
 
   // widget/src/sdk.js
   var EventEmitter = class {
@@ -7133,9 +9708,10 @@ ${tag}` : tag;
       return sdkInstance.mount(options);
     }
     _isDemoPage() {
-      if (typeof window === "undefined") return false;
-      const { pathname, hostname } = window.location;
-      return pathname.startsWith("/demo") || pathname === "/demo" || hostname.endsWith(".vercel.app");
+      if (typeof window === "undefined" || !window.location) return false;
+      const pathname = String(window.location.pathname || "");
+      const hostname = String(window.location.hostname || "");
+      return pathname.startsWith("/demo") || hostname.endsWith(".vercel.app");
     }
     /**
      * Initialize the SDK and mount widget
@@ -7167,7 +9743,13 @@ ${tag}` : tag;
         );
       }
       const isDemo = this._isDemoPage();
-      if (assistantId === "hirepool" && typeof window !== "undefined" && !isDemo && !isHirePoolPublicSiteUrl(window.location.href)) {
+      const hirePoolApp = assistantId === "hirepool" && options.hirePoolApp ? options.hirePoolApp : null;
+      if (hirePoolApp && typeof window !== "undefined" && !isDemo && !isHirePoolAppUrl(window.location.href)) {
+        throw new Error(
+          "The in-app HirePool assistant is available only inside the HirePool app"
+        );
+      }
+      if (!hirePoolApp && assistantId === "hirepool" && typeof window !== "undefined" && !isDemo && !isHirePoolPublicSiteUrl(window.location.href)) {
         throw new Error(
           "The HirePool assistant is available only on approved public website pages"
         );
@@ -7189,7 +9771,22 @@ ${tag}` : tag;
           );
         }
       }
-      if (assistantId === "hirepool" || assistantId === "default") {
+      if (hirePoolApp) {
+        this._hirePoolAppSession = new HirePoolAppSession({
+          apiUrl,
+          getAccessToken: hirePoolApp.getAccessToken
+        });
+        options.integration = this._hirePoolAppSession.getHostIntegrationConfig(this);
+        this._explicitPresentation = {
+          name: options.name,
+          greeting: options.greeting,
+          suggestedPrompts: options.suggestedPrompts
+        };
+        if (!options.name) options.name = "HirePool Assistant";
+        if (!options.context && typeof window !== "undefined") {
+          options.context = { surface: "app", page: window.location.pathname };
+        }
+      } else if (assistantId === "hirepool" || assistantId === "default") {
         if (!this._hirePoolBridge) {
           this._hirePoolBridge = new HirePoolBridge(this, {
             initialPath: options.initialPath || (typeof window !== "undefined" ? window.location.pathname : "/")
@@ -7198,6 +9795,11 @@ ${tag}` : tag;
         if (!options.integration) {
           options.integration = this._hirePoolBridge.getHostIntegrationConfig();
         }
+        this._explicitPresentation = {
+          name: options.name,
+          greeting: options.greeting,
+          suggestedPrompts: options.suggestedPrompts
+        };
         if (!options.greeting) options.greeting = HIREPOOL_ASSISTANT_GREETING;
         if (!options.suggestedPrompts)
           options.suggestedPrompts = HIREPOOL_GUEST_SUGGESTED_PROMPTS;
@@ -7213,7 +9815,7 @@ ${tag}` : tag;
       this.initializing = true;
       this.integration = integration;
       this.actionHandlers.clear();
-      if (assistantId === "hirepool" || assistantId === "default") {
+      if (!hirePoolApp && (assistantId === "hirepool" || assistantId === "default")) {
         this.actionHandlers.set(
           HIREPOOL_LOGIN_ACTION,
           () => openHirePoolLogin({
@@ -7246,7 +9848,18 @@ ${tag}` : tag;
           err.message
         );
       }
+      const surface = serverConfig.surface === "website" || serverConfig.surface === "app" ? serverConfig.surface : null;
+      if (surface && this._explicitPresentation) {
+        const explicit = this._explicitPresentation;
+        if (!explicit.name && serverConfig.name) options.name = serverConfig.name;
+        if (!explicit.greeting && serverConfig.greeting)
+          options.greeting = serverConfig.greeting;
+        if (!explicit.suggestedPrompts && Array.isArray(serverConfig.suggestedPrompts))
+          options.suggestedPrompts = serverConfig.suggestedPrompts;
+      }
       this.config = {
+        surface,
+        behavior: serverConfig.behavior && typeof serverConfig.behavior === "object" ? serverConfig.behavior : {},
         assistantId,
         apiUrl,
         name: options.name || serverConfig.name || "HirePool Assistant",
@@ -7281,10 +9894,72 @@ ${tag}` : tag;
       );
       this._setupIntegrationHooks();
       this.widgetUI.mount(styles_default);
+      if (this._hirePoolAppSession) {
+        const onSignOut = typeof hirePoolApp?.onSignOut === "function" ? hirePoolApp.onSignOut : null;
+        this._profileWasIncomplete = true;
+        this.widgetUI.setProfileFormHandlers?.({
+          load: (mode) => this._profileFormRequest("GET", mode),
+          save: (values) => this._profileFormRequest("POST", null, values)
+        });
+        this.widgetUI.setAssistantHandlers?.({
+          addCandidate: (candidate) => this._assistantRequest("POST", "bench-candidates", { candidate }, { acceptStatuses: [422] }),
+          listJobs: () => this._assistantRequest("GET", "agency-jobs").then((data) => Array.isArray(data?.jobs) ? data.jobs : []),
+          submit: (jobId, candidateIds) => this._assistantRequest("POST", "bench-submit", { jobId, candidateIds })
+        });
+        let lastProgressCheck = 0;
+        this.events.on("open", () => {
+          if (Date.now() - lastProgressCheck < 1e4) return;
+          lastProgressCheck = Date.now();
+          this._fetchHirePoolAppWelcome().then((loaded) => {
+            if (loaded) this.widgetUI?.updateProfileProgress?.(loaded.welcome.profileProgress || null);
+          }).catch(() => {
+          });
+        });
+        this.events.on("profile-form:saved", () => {
+          this._fetchHirePoolAppWelcome().then((loaded) => {
+            if (loaded) this.widgetUI?.updateProfileProgress?.(loaded.welcome.profileProgress || null);
+            this._profileWasIncomplete = Boolean(loaded?.welcome?.profileNudge);
+          }).catch(() => {
+          });
+        });
+        this.events.on("action:success", (event) => {
+          const data = event?.result?.data || event?.result;
+          if (data?.verifiedProfile && data?.verificationStatus === "verified") {
+            setTimeout(() => {
+              this._continueProfileCompletion().catch(() => {
+              });
+            }, 1200);
+          }
+        });
+        this.events.on("auth:refresh-needed", () => {
+          this._hirePoolAppSession?.invalidate();
+        });
+        this.events.on("auth:logout", () => {
+          const appSession = this._hirePoolAppSession;
+          if (appSession) {
+            appSession.ended = true;
+            appSession.invalidate();
+          }
+          if (onSignOut) {
+            setTimeout(() => {
+              try {
+                onSignOut();
+              } catch (error) {
+                console.error("[AssistantSDK] The app could not complete sign-out.", error);
+              }
+            }, 1500);
+          }
+        });
+      }
       this.initialized = true;
       this.refreshHostIdentity().catch(
         (error) => this.events.emit("error", error)
       );
+      if (this._hirePoolAppSession) {
+        this._loadHirePoolAppWelcome().catch(
+          (error) => this.events.emit("error", error)
+        );
+      }
       this.events.emit("ready", { assistantId, config: this.config });
       return this;
     }
@@ -7457,6 +10132,185 @@ ${tag}` : tag;
       this.widgetUI._persistState();
       if (!this.widgetUI.isOpen) this.widgetUI.open();
       return this.widgetUI.sendMessage(message, { displayUserMessage: false });
+    }
+    /**
+     * In-app bot: personal greeting and the next missing profile detail.
+     * Falls back silently to the server's generic app greeting on any error.
+     */
+    /** In-app bot: fetch the personal greeting and the profile-completeness check. */
+    async _fetchHirePoolAppWelcome() {
+      const session = await this._hirePoolAppSession?.getSession().catch(() => null);
+      if (!session?.credential || !this.widgetUI) return null;
+      const hour = (/* @__PURE__ */ new Date()).getHours();
+      const response = await fetch(
+        `${this.config.apiUrl || ""}/api/hirepool/assistant/welcome?hour=${hour}`,
+        {
+          headers: { Authorization: `Bearer ${session.credential}` },
+          credentials: "omit",
+          cache: "no-store"
+        }
+      );
+      if (!response.ok) return null;
+      return { welcome: await response.json(), session };
+    }
+    /** In-app bot: load (GET) or save (POST) the profile form. */
+    _profileFormRequest(method, mode = "all", values = null) {
+      return method === "GET" ? this._assistantRequest("GET", `profile-form?mode=${mode === "missing" ? "missing" : "all"}`) : this._assistantRequest("POST", "profile-form", { values });
+    }
+    /**
+     * In-app bot: call /api/hirepool/assistant/<path> with the signed-in user's
+     * assistant credential. Errors carry a friendly `message` and, for invalid
+     * input, per-field `fields`. Statuses in `acceptStatuses` return their body.
+     */
+    async _assistantRequest(method, path, body = null, { acceptStatuses = [] } = {}) {
+      const session = await this._hirePoolAppSession?.getSession().catch(() => null);
+      if (!session?.credential) {
+        throw new Error("Please log in to HirePool again to continue.");
+      }
+      const url = `${this.config.apiUrl || ""}/api/hirepool/assistant/${path}`;
+      const values = body;
+      let response;
+      try {
+        response = await fetch(url, {
+          method,
+          headers: {
+            Authorization: `Bearer ${session.credential}`,
+            ...method === "POST" ? { "Content-Type": "application/json" } : {}
+          },
+          body: method === "POST" ? JSON.stringify(values || {}) : void 0,
+          credentials: "omit",
+          cache: "no-store"
+        });
+      } catch {
+        const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+        throw new Error(
+          offline ? "You seem to be offline. Check your connection and try again." : "I couldn't reach the HirePool assistant service just now. Please try again in a moment."
+        );
+      }
+      const data = await response.json().catch(() => null);
+      if (!response.ok && acceptStatuses.includes(response.status) && data) return data;
+      if (!response.ok) {
+        if (response.status === 401) this._hirePoolAppSession?.invalidate();
+        const error = new Error(data?.error?.message || data?.message || "Something went wrong. Please try again.");
+        error.fields = data?.error?.fields || null;
+        error.status = response.status;
+        throw error;
+      }
+      return data;
+    }
+    /**
+     * Pages where the assistant must never pop up (tests, interviews, offers, onboarding).
+     */
+    _isQuietPage() {
+      const path = typeof window !== "undefined" ? window.location.pathname : "";
+      return /\/(?:screening|ai-interview|interview|video|offers?|onboarding|bgv|joining|checkin)(?:\/|$)/i.test(path);
+    }
+    /**
+     * In-app bot: personal greeting, and — while the profile is incomplete — open
+     * the assistant once per login session with the list of missing fields.
+     * Falls back silently to the server's generic app greeting on any error.
+     */
+    async _loadHirePoolAppWelcome() {
+      const loaded = await this._fetchHirePoolAppWelcome();
+      if (!loaded || !this.widgetUI) return;
+      const { welcome, session } = loaded;
+      this.widgetUI.setUserRole?.(welcome.role || session.identity?.userType || null);
+      const userKey = String(session.identity?.id || "user").slice(0, 80);
+      const explicit = this._explicitPresentation || {};
+      if (!explicit.greeting && typeof welcome.greeting === "string") {
+        this.widgetUI.setGreeting(
+          welcome.greeting,
+          explicit.suggestedPrompts || (Array.isArray(welcome.suggestedPrompts) ? welcome.suggestedPrompts : [])
+        );
+      }
+      const firstVisitKey = `hirepool-assistant:dashboard-welcomed:${userKey}`;
+      const profilePopupKey = `hirepool-assistant:profile-popup:${userKey}`;
+      let firstVisit = false;
+      let profilePopup = false;
+      const welcomeShown = Boolean(this.widgetUI.showAppWelcome?.(welcome));
+      if (welcome.profileNudge) {
+        const shown = welcomeShown || this.widgetUI.showProfileNudge?.(welcome.profileNudge, userKey);
+        try {
+          const snoozed = Number(localStorage.getItem(`hirepool-assistant:profile-nudge:${userKey}:snoozed-until`) || 0) > Date.now();
+          profilePopup = Boolean(shown) && !snoozed && sessionStorage.getItem(profilePopupKey) !== "1";
+        } catch {
+          profilePopup = false;
+        }
+      }
+      if (this.config.behavior?.firstVisitOpen && session.identity?.id) {
+        try {
+          firstVisit = localStorage.getItem(firstVisitKey) !== "1";
+        } catch {
+          firstVisit = false;
+        }
+      }
+      if (firstVisit || profilePopup) {
+        const autoOpen = this.config.behavior?.autoOpen || {};
+        this.widgetUI.scheduleAutoOpen?.(
+          {
+            delayMs: autoOpen.delayMs || 3e4,
+            mobile: autoOpen.mobile || "bubble",
+            teaser: autoOpen.teaser || "Hi! \u{1F44B} Need help with your dashboard?",
+            snoozeHours: autoOpen.snoozeHours ?? 24
+          },
+          {
+            isBlocked: () => this._isQuietPage(),
+            onOpen: (how) => {
+              try {
+                if (firstVisit) localStorage.setItem(firstVisitKey, "1");
+                if (profilePopup) sessionStorage.setItem(profilePopupKey, "1");
+              } catch {
+              }
+              this.events.emit("dashboard-popup:opened", {
+                how,
+                role: welcome.role || null,
+                reason: profilePopup ? "profile-incomplete" : "first-visit",
+                missing: welcome.profileNudge?.missing || []
+              });
+            }
+          }
+        );
+      }
+      this.events.emit("welcome", { role: welcome.role || null });
+    }
+    /**
+     * After a profile update is saved, move straight on to the next missing field
+     * (or celebrate a complete profile).
+     */
+    async _continueProfileCompletion() {
+      const loaded = await this._fetchHirePoolAppWelcome().catch(() => null);
+      if (!loaded || !this.widgetUI) return;
+      this.widgetUI.updateProfileProgress?.(loaded.welcome.profileProgress || null);
+      if (loaded.welcome.profileNudge) {
+        const left = Array.isArray(loaded.welcome.profileNudge.missing) ? loaded.welcome.profileNudge.missing.length : 0;
+        if (left > 0) {
+          this.widgetUI.postAssistantNote?.(
+            `${left} profile detail${left === 1 ? "" : "s"} still missing. Say **complete my profile** to fill them in a quick form.`
+          );
+        }
+      } else if (this._profileWasIncomplete) {
+        this.widgetUI.postAssistantNote?.("\u{1F389} Your profile is now complete. Nice work! Ask me anything else whenever you like.");
+      }
+      this._profileWasIncomplete = Boolean(loaded.welcome.profileNudge);
+    }
+    /** In-app bot: call after the HirePool app refreshes its access token. */
+    refreshHirePoolAppSession() {
+      this._hirePoolAppSession?.invalidate();
+    }
+    /**
+     * In-app bot: call when the user logs out of the HirePool app. Revokes the
+     * assistant credential, clears this tab's conversation, and removes the widget.
+     */
+    async endHirePoolAppSession() {
+      const appSession = this._hirePoolAppSession;
+      if (!appSession) return;
+      this._hirePoolAppSession = null;
+      try {
+        this.widgetUI?.clearLocalConversation?.();
+      } catch {
+      }
+      await appSession.end();
+      if (this.initialized) this.destroy();
     }
     clearConversationLocal() {
       this._ensureInit();
@@ -7790,6 +10644,8 @@ ${tag}` : tag;
         this._hirePoolBridge.destroy();
         this._hirePoolBridge = null;
       }
+      this._hirePoolAppSession = null;
+      this._explicitPresentation = null;
       this.initialized = false;
     }
     _ensureInit() {
@@ -7798,7 +10654,8 @@ ${tag}` : tag;
           "[AssistantSDK] SDK is not initialized. Please call AssistantSDK.init() first."
         );
       }
-      if (this.config?.assistantId === "hirepool" && typeof window !== "undefined" && !this._isDemoPage() && !isHirePoolPublicSiteUrl(window.location.href)) {
+      const allowedHere = this._hirePoolAppSession ? isHirePoolAppUrl(window.location.href) : isHirePoolPublicSiteUrl(window.location.href);
+      if (this.config?.assistantId === "hirepool" && typeof window !== "undefined" && !this._isDemoPage() && !allowedHere) {
         throw new Error("The HirePool assistant is unavailable on this page");
       }
     }

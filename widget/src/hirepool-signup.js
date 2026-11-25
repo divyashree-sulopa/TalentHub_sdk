@@ -81,11 +81,10 @@ function escapeHtml(str) {
     .replace(/'/g, '&#039;');
 }
 
+// Local-only for now: only links into the local HirePool app are shown.
 const APPROVED_VERIFICATION_ORIGINS = new Set([
   'http://localhost:5173',
-  'http://127.0.0.1:5173',
-  'https://app.hirepool.ai',
-  'https://hirepool.ai'
+  'http://127.0.0.1:5173'
 ]);
 
 /**
@@ -137,9 +136,10 @@ export function parseHirePoolRoleChoice(text) {
 }
 
 export class HirePoolSignupCoordinator {
-  constructor({ apiClient, onAuthenticated, onStateChange, onAddMessage } = {}) {
+  constructor({ apiClient, onAuthenticated, onHandoff, onStateChange, onAddMessage } = {}) {
     this.apiClient = apiClient;
     this.onAuthenticated = onAuthenticated;
+    this.onHandoff = onHandoff;
     this.onStateChange = onStateChange;
     this.onAddMessage = onAddMessage;
 
@@ -385,6 +385,15 @@ export class HirePoolSignupCoordinator {
         signupToken: this.session.signupToken,
         confirmedProfile: payload
       });
+
+      // Website bot: the account is created; hand the visitor to the HirePool app.
+      if (result?.handoff?.type === 'app') {
+        if (this.onHandoff) {
+          await this.onHandoff({ ...result.handoff, role: result.handoff.role || this.selectedRole });
+        }
+        this.setState(HIREPOOL_SIGNUP_STATES.COMPLETED, { result });
+        return result;
+      }
 
       // Step 13: PROFILE_READBACK
       this.setState(HIREPOOL_SIGNUP_STATES.PROFILE_READBACK, { profile: result.profile });

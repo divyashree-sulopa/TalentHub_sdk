@@ -634,7 +634,7 @@ test('Phase 1.2 Area 2 & 5: recovers grounded FAQ answers and suppresses repetit
     ['Do you support freshers?', /freshers|entry[\s-]*level|0\+ years/i],
     ['Can I search for remote jobs?', /remote|hybrid|onsite/i],
     ['Do you have jobs for experienced professionals?', /experienced professionals|mid.*senior.*lead/i],
-    ['Explain pricing in HirePool.', /free forever|14-day free trial|https:\/\/hirepool\.ai\/pricing/i],
+    ['Explain pricing in HirePool.', /hi@hirepool\.ai|hirepool\.ai\/contact/i],
     ["What's the privacy policy of HirePool?", /https:\/\/hirepool\.ai\/privacy|2 years|encryption/i],
     ['Terms of Service.', /https:\/\/hirepool\.ai\/terms|Singapore|human recruiters/i],
     ["I'm new to HirePool and want to see how it works.", /Welcome to HirePool/i]
@@ -672,7 +672,8 @@ test('Phase 1.2 Area 2 & 5: recovers grounded FAQ answers and suppresses repetit
     .expect(200);
   const doneEvt = parseSseEvents(sseRes.text).find(e => e.type === 'done');
   assert.ok(doneEvt);
-  assert.match(doneEvt.text, /Free forever|14-day free trial/i);
+  assert.match(doneEvt.text, /hi@hirepool\.ai|hirepool\.ai\/contact/i);
+  assert.doesNotMatch(doneEvt.text, /free forever|free trial|14-day/i);
   assert.equal(doneEvt.action, undefined);
 
   // Explicit signup STILL emits the signup card cleanly with role parameter

@@ -2,6 +2,8 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { storeHirePoolSession, findHirePoolContextBySdkCredential } from '../local-integrations/hirepool-session-store.js';
 import { isHirePoolLocalBridgeEnabled } from '../local-integrations/hirepool-auth.js';
+import { ASSISTANT_SURFACES, getHirePoolAppHomeUrl, resolveAssistantSurface } from '../surface.js';
+import { SharedRecordMap } from '../state/state-store.js';
 import { extractCredentials, AuthenticationError } from '../middleware/auth.js';
 import {
   HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS,
@@ -36,7 +38,8 @@ export {
 const ONBOARDING_SESSION_TTL_MS = 30 * 60 * 1000; // 30 minutes
 const ALLOWED_USER_TYPES = Object.freeze(['candidate', 'client', 'consultancy']);
 
-const onboardingSessions = new Map();
+// Saved to Redis when configured, so each signup step can reach any server instance.
+const onboardingSessions = new SharedRecordMap('signup');
 
 export function cleanupExpiredOnboardingSessions(now = Date.now()) {
   for (const [token, session] of onboardingSessions) {
@@ -61,11 +64,9 @@ function getHirePoolBaseUrl(env = process.env) {
 }
 
 function getApprovedVerificationOrigins(env = process.env) {
-  const origins = new Set([
-    ...HIREPOOL_LOCAL_DASHBOARD_ORIGINS,
-    'https://app.hirepool.ai',
-    'https://hirepool.ai'
-  ]);
+  // Local-only for now: verification links must point at the local HirePool app
+  // (add a deployed app with HIREPOOL_FRONTEND_URL when it is time).
+  const origins = new Set([...HIREPOOL_LOCAL_DASHBOARD_ORIGINS]);
   const configuredFrontendUrl = env.HIREPOOL_FRONTEND_URL || env.HIREPOOL_PUBLIC_FRONTEND_URL;
   if (configuredFrontendUrl) {
     try {
@@ -117,6 +118,18 @@ export function createHirePoolSignupRouter({
   getBaseUrl = getHirePoolBaseUrl
 } = {}) {
   const router = Router();
+
+  // Load this signup's progress if another server instance handled the previous step.
+  router.use(async (req, res, next) => {
+    try {
+      await onboardingSessions.hydrate(req.body?.signupToken || req.query?.signupToken);
+      next();
+    } catch {
+      res.status(503).json({
+        error: { code: 'STATE_UNAVAILABLE', message: 'Signup is temporarily unavailable. Please try again shortly.' }
+      });
+    }
+  });
 
   // 1. Fetch active User Agreement for a role
   router.get('/agreement', async (req, res) => {
@@ -745,6 +758,23 @@ export function createHirePoolSignupRouter({
       }
 
       const verifiedProfile = await readbackRes.json();
+
+      // Website bot: signup ends with a link to the HirePool app and a thank-you.
+      // No assistant login is created on the public website.
+      if (resolveAssistantSurface(req) === ASSISTANT_SURFACES.WEBSITE) {
+        onboardingSessions.delete(signupToken);
+        return res.status(200).json({
+          status: 'success',
+          stage: 'completed',
+          handoff: {
+            type: 'app',
+            // Straight to their profile (candidates) or dashboard (companies, agencies).
+            url: getHirePoolAppHomeUrl(session.userType),
+            role: session.userType
+          },
+          message: 'Your HirePool account is ready. Continue to your HirePool dashboard to get started.'
+        });
+      }
 
       // Establish verified SDK session
       const sdkSession = storeHirePoolSession(

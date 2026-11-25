@@ -1,3 +1,4 @@
+import fs from 'fs';
 import {
   getHirePoolApiAccessToken,
   getHirePoolValidAccessToken
@@ -806,10 +807,43 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
     };
   }
 
-  if (
-    operationId === 'add_candidate_api_v1_consultancies_candidates_post' ||
-    operationId === 'update_candidate_api_v1_consultancies_candidates__candidate_id__put'
-  ) {
+  // Updating a bench candidate changes only the given fields, so check just those.
+  if (operationId === 'update_candidate_api_v1_consultancies_candidates__candidate_id__put') {
+    const body = argumentsValue.body && typeof argumentsValue.body === 'object' ? argumentsValue.body : {};
+    const errors = [];
+    const clean = {};
+    const labels = {
+      phone: 'Phone', email: 'Email', current_location: 'Location', job_title: 'Job title',
+      years_of_experience: 'Experience', skills: 'Skills', bench_status: 'Bench status', notice_period_days: 'Notice period'
+    };
+    for (const [key, value] of Object.entries(body)) {
+      if (!Object.hasOwn(labels, key)) { errors.push(`"${key}" can't be changed here.`); continue; }
+      if (key === 'phone' && !/^\d{10}$/.test(String(value))) errors.push('Phone numbers need exactly 10 digits.');
+      else if (key === 'email' && !/^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(value))) errors.push('That email address is not valid.');
+      else if (key === 'years_of_experience' && !(Number.isInteger(value) && value >= 0 && value <= 50)) errors.push('Experience must be between 0 and 50 years.');
+      else if (key === 'notice_period_days' && !(Number.isInteger(value) && value >= 0 && value <= 365)) errors.push('Notice period must be between 0 and 365 days.');
+      else if (key === 'bench_status' && !['available', 'on_assignment', 'notice_period'].includes(value)) errors.push('Bench status must be available, on assignment, or notice period.');
+      else if (key === 'skills' && !(Array.isArray(value) && value.length && value.every(s => typeof s === 'string' && s.trim() && s.length <= 60))) errors.push('Skills must be a list of names.');
+      else if (['current_location', 'job_title'].includes(key) && !(typeof value === 'string' && value.trim() && value.length <= 120)) errors.push(`${labels[key]} must be 1–120 characters.`);
+      else clean[key] = typeof value === 'string' ? value.trim() : value;
+    }
+    if (!Object.keys(clean).length && !errors.length) errors.push('Tell me which detail to change.');
+    if (errors.length) return { ready: false, reviewMessage: errors.join(' ') };
+    const fields = Object.entries(clean).map(([key, value]) => ({ label: labels[key], value: Array.isArray(value) ? value.join(', ') : String(value) }));
+    return {
+      ready: true,
+      argumentsValue: { ...argumentsValue, body: clean },
+      formattedReview: { type: 'candidate_update', title: 'Update Bench Candidate', fields },
+      reviewMessage: [
+        'Review the change to this bench candidate:',
+        ...fields.map(f => `- **${f.label}**: ${f.value}`),
+        '',
+        'Choose “Confirm & Execute” to save it.'
+      ].join('\n')
+    };
+  }
+
+  if (operationId === 'add_candidate_api_v1_consultancies_candidates_post') {
     const body = argumentsValue.body || {};
     const validation = validateCandidateCreation(body);
     if (!validation.isValid) {
@@ -1081,6 +1115,11 @@ export function registerHirePoolLocalDevelopmentIntegration(options = {}) {
       typeof user?.integrationSessionId === 'string' &&
       Boolean(await getHirePoolValidAccessToken(user)),
     prepareAction: prepareHirePoolAction,
+    // Bundled snapshot used only when the live spec cannot be fetched.
+    getFallbackSpecText: () => fs.readFileSync(
+      new URL('../../config/hirepool-openapi-fallback.json', import.meta.url),
+      'utf8'
+    ),
     getAuthHeaders: async user => {
       const accessToken = await getHirePoolValidAccessToken(user);
       if (!accessToken) throw new Error('The validated HirePool session has expired');

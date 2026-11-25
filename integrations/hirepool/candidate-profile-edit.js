@@ -36,8 +36,61 @@ import {
   matchAllowedOption,
   formatRoleProfileReview,
   buildInitialProfileEditState,
-  ensureRoleScopedProfileEditState
+  ensureRoleScopedProfileEditState,
+  isProfileQuestionOrChatter,
+  SKILL_CANONICAL_CASE,
+  SKILL_TYPO_MAP
 } from './profile-edit-shared.js';
+
+/**
+ * The visitor clearly asked to work on a different section (or gave a link),
+ * as opposed to merely mentioning a word like "github" in a skills list.
+ */
+function isExplicitSectionSwitch(text) {
+  const value = String(text || '');
+  if (/https?:\/\/|www\.|\b(?:github|linkedin|gitlab)\.com\b/i.test(value)) return true;
+  if (/\b(?:github|linkedin|portfolio|website)\s*(?:url|link|profile)?\s*(?:is|to|as|=|:)\s*\S/i.test(value)) return true;
+  return /\b(?:switch\s+to|go\s+to|move\s+to|update|edit|change|set|add)\s+(?:my\s+|the\s+)?(?:profile\s+links?|links?|github\s+(?:url|link|profile)|linkedin(?:\s+(?:url|link|profile))?|portfolio|personal\s+website|education|work\s+experience|experience|certifications?|(?:professional\s+)?summary|basic\s+(?:info|details)|phone(?:\s+number)?|location|job\s+title|preferences|salary)\b/i.test(value);
+}
+
+const FIELD_LABELS = Object.freeze({
+  github_url: 'GitHub URL',
+  linkedin_url: 'LinkedIn URL',
+  portfolio_url: 'Portfolio URL',
+  personal_website: 'Personal Website',
+  job_title: 'Job Title',
+  current_location: 'Current Location',
+  years_of_experience: 'Years of Experience',
+  months_of_experience: 'Months of Experience',
+  expected_salary_min: 'Expected Salary (Minimum)',
+  expected_salary_max: 'Expected Salary (Maximum)',
+  salary_currency: 'Salary Currency',
+  notice_period_days: 'Notice Period (Days)',
+  is_open_to_work: 'Open to Work',
+  preferred_work_types: 'Preferred Work Modes',
+  preferred_job_types: 'Preferred Job Types'
+});
+
+/** Human-friendly field names ("GitHub URL", not "Github Url" or "github url"). */
+function friendlyFieldLabel(field, { title = false } = {}) {
+  if (Object.hasOwn(FIELD_LABELS, field)) {
+    const label = FIELD_LABELS[field];
+    // Mid-sentence use keeps brand names and acronyms as they are.
+    return title || /^(?:GitHub|LinkedIn)/.test(label) ? label : label.toLowerCase();
+  }
+  const plain = String(field || '').replace(/_/g, ' ');
+  return title ? plain.replace(/\b\w/g, l => l.toUpperCase()) : plain;
+}
+
+/** A comma- or space-separated list where most items are known skills, e.g. "python, react, git, github". */
+function looksLikeSkillList(raw) {
+  const value = String(raw || '').trim();
+  if (!value || /https?:|www\.|@|\d{4,}/i.test(value)) return false;
+  const tokens = value.split(/[,;\n|]+|\s+/).map(t => t.trim().toLowerCase().replace(/[.!?]+$/, '')).filter(Boolean);
+  if (tokens.length < 2) return false;
+  const known = tokens.filter(t => Object.hasOwn(SKILL_CANONICAL_CASE, t) || Object.hasOwn(SKILL_TYPO_MAP, t)).length;
+  return known >= Math.ceil(tokens.length / 2);
+}
 import { handleOrgProfileEditTurn, getOrgOperationIds } from './org-profile-edit.js';
 
 export {
@@ -88,6 +141,25 @@ function isFilledField(value, fieldName) {
  * Determine whether a question is general informational guidance about profiles
  * (must stay public/conversational and NOT trigger private profile editing).
  */
+/**
+ * True when text is a request about the summary rather than the summary itself,
+ * e.g. "Update my profile: add a short professional summary" or "I want to add
+ * my summary". Such text must never be saved as the summary.
+ */
+export function isSummaryInstructionOnly(text) {
+  const value = String(text || '').trim();
+  if (!value) return true;
+  const words = value.split(/\s+/).length;
+  const mentionsSummary = /\b(?:professional\s+summary|summary|bio|my\s+profile|about\s+me)\b/i.test(value);
+  const soundsLikeRequest =
+    /\b(?:add|update|edit|change|set|write|want|need|like|help|create|fill|complete|improve|draft)\b/i.test(value) ||
+    /^(?:i(?:'d|\s+would)?|can\s+you|could\s+you|please)\b/i.test(value);
+  // A real summary describes the person; a short request that names the summary is an instruction.
+  if (mentionsSummary && soundsLikeRequest && words <= 15) return true;
+  // Too short to be a meaningful summary (e.g. "ok", "yes do it").
+  return value.length < 15;
+}
+
 export function isHirePoolHowToProfileQuestion(message) {
   const text = normalizeText(message);
   if (!text) return false;
@@ -992,7 +1064,8 @@ export function extractCandidateInlineFields(rawMessage, { pendingField = null }
   }
 
   // Single-field answer resolution when assistant explicitly asked for one field
-  if (Object.keys(patch).length === 0 && pendingField && raw && !isSkillInstructionPhrase(raw)) {
+  // A question or small talk is never saved as the value the bot asked for.
+  if (Object.keys(patch).length === 0 && pendingField && raw && !isSkillInstructionPhrase(raw) && !isProfileQuestionOrChatter(raw)) {
     const val = raw.trim();
     if (pendingField === 'years_of_experience' || pendingField === 'months_of_experience' || pendingField === 'notice_period_days') {
       const n = Number(val.replace(/[^\d.-]/g, ''));
@@ -1593,7 +1666,7 @@ export function formatCandidateProfileReview(body, currentProfile = {}, nextSect
   ];
   for (const scalar of scalarFields) {
     if (Object.hasOwn(body, scalar) && body[scalar] !== undefined) {
-      const label = scalar.replace(/_/g, ' ').replace(/\b\w/g, l => l.toUpperCase());
+      const label = friendlyFieldLabel(scalar, { title: true });
       const prev = currentProfile?.[scalar];
       const nextVal = body[scalar] === null ? '(cleared)' : String(body[scalar]);
       const diffText = prev !== undefined && prev !== null && prev !== '' && String(prev) !== nextVal
@@ -2374,9 +2447,20 @@ export async function handleCandidateProfileEditTurn({
 
   // Parse requested section(s) from message
   const { sections: rawParsedSections, operation: parsedOp, targetIndex: parsedIdx } = extractProfileEditSections(text);
-  const directChoiceSection = normalizeSectionAnswer(text);
-  const parsedSections =
-    rawParsedSections.length === 0 && !directChoiceSection && parseCompoundSkillEdit(raw).matched
+  // While adding skills (or when the message is plainly a skills list), words like
+  // "github" are skills, not a request to open the links section.
+  const skillsListOnly = !isExplicitSectionSwitch(raw) && (
+    state.selectedSection === HIREPOOL_PROFILE_SECTIONS.SKILLS ||
+    looksLikeSkillList(raw)
+  ) && !isProfileQuestionOrChatter(raw);
+  if (skillsListOnly && looksLikeSkillList(raw)) {
+    state.selectedSection = HIREPOOL_PROFILE_SECTIONS.SKILLS;
+    state.draftData = { ...state.draftData, pendingField: null };
+  }
+  const directChoiceSection = skillsListOnly ? null : normalizeSectionAnswer(text);
+  const parsedSections = skillsListOnly
+    ? []
+    : rawParsedSections.length === 0 && !directChoiceSection && parseCompoundSkillEdit(raw).matched
       ? [HIREPOOL_PROFILE_SECTIONS.SKILLS]
       : rawParsedSections;
 
@@ -2387,8 +2471,10 @@ export async function handleCandidateProfileEditTurn({
     HIREPOOL_PROFILE_SECTIONS.CERTIFICATIONS,
     HIREPOOL_PROFILE_SECTIONS.PROFESSIONAL_SUMMARY
   ].includes(state.selectedSection);
-  const explicitInlineSwitch = /\b(?:basic\s+(?:info|details)|preferences?|social\s+links?|profile\s+links?|contact\s+info|my\s+phone|current\s+location)\b/i.test(text) ||
-    /^\s*(?:basic\s+(?:info|details)|preferences?|links?)\s*$/i.test(text);
+  const explicitInlineSwitch = !skillsListOnly && (
+    /\b(?:basic\s+(?:info|details)|preferences?|social\s+links?|profile\s+links?|contact\s+info|my\s+phone|current\s+location)\b/i.test(text) ||
+    /^\s*(?:basic\s+(?:info|details)|preferences?|links?)\s*$/i.test(text)
+  );
   const targetsInlineSections = explicitInlineSwitch || (
     !structuredSectionActive && parsedSections.some(s => [
       HIREPOOL_PROFILE_SECTIONS.BASIC_INFO,
@@ -2587,7 +2673,9 @@ export async function handleCandidateProfileEditTurn({
       const stripped = raw
         .replace(/^(?:please\s+)?(?:add|edit|update|set|change)\s+(?:my\s+)?(?:professional\s+summary|summary|bio)\s*(?:to|as|with|:)?\s*/i, '')
         .trim();
-      if (stripped.length > 0 && !/^(?:professional\s+summary|summary|bio)$/i.test(stripped)) {
+      if (stripped.length > 0 &&
+          !/^(?:professional\s+summary|summary|bio)$/i.test(stripped) &&
+          !isSummaryInstructionOnly(stripped)) {
         summaryCandidate = stripped;
       }
     }
@@ -3071,6 +3159,20 @@ export async function handleCandidateProfileEditTurn({
       };
     }
 
+    // "have u updated my skills" and similar: answer it, don't save it.
+    if (parsedSkills.question) {
+      state.stage = 'collecting';
+      state.updatedAt = new Date().toISOString();
+      session.hirePoolProfileEdit = state;
+      const status = existingSkills.length
+        ? `Your skills on HirePool right now: **${existingSkills.join(', ')}**.`
+        : 'Not yet. You have no skills saved on your HirePool profile.';
+      return {
+        handled: true,
+        text: `${status}\n\nTell me the skills to add, separated by commas (for example: *Python, JavaScript, React*), or say **Cancel** to stop.`
+      };
+    }
+
     if (parsedSkills.kind === 'instruction' || parsedSkills.kind === 'empty') {
       state.stage = 'collecting';
       state.draftData = {
@@ -3195,7 +3297,7 @@ export async function handleCandidateProfileEditTurn({
     return {
       handled: true,
       text: pendingField
-        ? `What value would you like to set for **${pendingField.replace(/_/g, ' ')}**?`
+        ? `What would you like your **${friendlyFieldLabel(pendingField)}** to be?`
         : buildSectionPrompt(activeSection, currentProfile, {
             operation: state.operation,
             pendingSections: state.pendingSections

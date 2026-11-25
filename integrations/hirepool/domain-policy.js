@@ -72,7 +72,7 @@ export const HIREPOOL_COMPETITOR_POLICY_RESPONSE =
   "I cannot provide ratings or reviews for external job platforms. On HirePool, I can help you with matching jobs, job applications, candidate profiles, recruitment, and job postings.";
 
 export const HIREPOOL_PRODUCT_COMPARISON_RESPONSE =
-  "While I cannot provide ratings or reviews for external job platforms like Naukri, here is what distinguishes HirePool:\n\n- **AI-Powered Matching:** Evaluates candidate skills, experience, and preferences against active job requirements for ranked match scores.\n- **Direct Recruitment Across Three Roles:** Dedicated workspaces for **Candidates** (free forever), **Employers / Companies** (direct hiring, screening, and AI video interviews), and **Consultancies / Staffing Agencies** (talent bench and placement tracking).\n- **Transparent Application Tracking:** Real-time visibility into application stages without duplicate submissions.\n\nLet me know if you would like to explore jobs, learn about our hiring features, or create an account!";
+  "While I cannot provide ratings or reviews for external job platforms like Naukri, here is what distinguishes HirePool:\n\n- **AI-Powered Matching:** Evaluates candidate skills, experience, and preferences against active job requirements for ranked match scores.\n- **Direct Recruitment Across Three Roles:** Dedicated workspaces for **Candidates**, **Employers / Companies** (direct hiring, screening, and AI video interviews), and **Consultancies / Staffing Agencies** (talent bench and placement tracking).\n- **Transparent Application Tracking:** Real-time visibility into application stages without duplicate submissions.\n\nLet me know if you would like to explore jobs, learn about our hiring features, or create an account!";
 
 export const HIREPOOL_AMBIGUOUS_CLARIFICATION_RESPONSE =
   "Could you please clarify what you'd like assistance with? I can help you with HirePool job matching, applications, candidate profiles, or employer hiring workflows.";
@@ -241,6 +241,14 @@ export function hasInScopeSessionContext(session, options = {}) {
 
   const jobCreate = session?.hirePoolJobCreate;
   if (jobCreate?.active && !['completed', 'cancelled'].includes(jobCreate.stage)) {
+    return true;
+  }
+
+  const candidateDraft = session?.consultancyCandidateDraft;
+  if (candidateDraft?.active && !['completed', 'cancelled'].includes(candidateDraft.stage)) {
+    return true;
+  }
+  if (session?.consultancyCandidateEdit?.pendingField) {
     return true;
   }
 
@@ -473,7 +481,11 @@ export function classifyHirePoolMessage(message, session = null, options = {}) {
   const inActiveJobCreate = Boolean(
     session?.hirePoolJobCreate?.active &&
       !['completed', 'cancelled'].includes(session.hirePoolJobCreate.stage)
-  );
+  ) || Boolean(
+    // An agency adding a candidate: replies like "naidu bengaluru, india" are the next details.
+    session?.consultancyCandidateDraft?.active &&
+      !['completed', 'cancelled'].includes(session.consultancyCandidateDraft.stage)
+  ) || Boolean(session?.consultancyCandidateEdit?.pendingField);
   const generalKnowledgeQ = /^(?:who|what|where|when|why|how|which)\s+(?:is|are|was|were|do|does|did|can|will|should)\b/i;
 
   if ((inActiveProfileEdit || inActiveJobCreate) && !generalKnowledgeQ.test(text) && !isHirePoolLogoutRequest(text)) {

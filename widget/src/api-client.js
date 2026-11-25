@@ -424,8 +424,10 @@ export class AssistantApiClient {
     if (conversationId) {
       formData.append('conversationId', conversationId);
     }
-    if (options.assistantId) {
-      formData.append('assistantId', options.assistantId);
+    // The upload must belong to the same assistant as the chat, or later questions are refused.
+    const uploadAssistantId = options.assistantId || this.assistantId;
+    if (uploadAssistantId) {
+      formData.append('assistantId', uploadAssistantId);
     }
 
     const res = await fetch(url, {

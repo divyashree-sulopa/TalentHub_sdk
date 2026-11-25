@@ -1,7 +1,65 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import {
+  getStateStore,
+  markStateTouched,
+  registerStateFlushHandler
+} from '../state/state-store.js';
 
 const contextsByCredential = new Map();
 const credentialsByAccessToken = new Map();
+const STATE_NAMESPACE = 'sdk-session';
+const TOUCHED = 'sdk-session';
+const DELETED = 'sdk-session-deleted';
+// Avoid a Redis write on every chat message just to extend the expiry.
+const TOUCH_PERSIST_INTERVAL_MS = 60 * 1000;
+
+function persistableContext(context) {
+  // The raw SDK credential is never stored; requests present it and only its digest is the key.
+  const { credential, ...rest } = context;
+  return rest;
+}
+
+registerStateFlushHandler(async scope => {
+  const store = getStateStore();
+  const now = Date.now();
+  const writes = [];
+  for (const credentialDigest of scope.get(TOUCHED) || []) {
+    const context = contextsByCredential.get(credentialDigest);
+    if (!context || context.expiresAt <= now) continue;
+    context.persistedAt = now;
+    writes.push(store.setJson(STATE_NAMESPACE, credentialDigest, persistableContext(context), context.expiresAt - now));
+  }
+  for (const credentialDigest of scope.get(DELETED) || []) {
+    writes.push(store.delete(STATE_NAMESPACE, credentialDigest));
+  }
+  await Promise.all(writes);
+});
+
+/** Tests only: forget in-memory logins, as a fresh server instance would. */
+export function _resetHirePoolSessionMemory() {
+  contextsByCredential.clear();
+  credentialsByAccessToken.clear();
+}
+
+/**
+ * Load an SDK login saved by another server instance. No-op without Redis or
+ * when the login is already in memory.
+ * @param {string} credential raw SDK credential from the request
+ */
+export async function hydrateHirePoolSessionByCredential(credential) {
+  if (typeof credential !== 'string' || !credential || credential.length > 512) return null;
+  const store = getStateStore();
+  if (!store.shared) return null;
+  const credentialDigest = digest(credential);
+  const existing = contextsByCredential.get(credentialDigest);
+  if (existing) return existing;
+  const record = await store.getJson(STATE_NAMESPACE, credentialDigest);
+  if (!record || record.credentialDigest !== credentialDigest || !(record.expiresAt > Date.now())) return null;
+  const context = { ...record, credential };
+  contextsByCredential.set(credentialDigest, context);
+  if (context.accessTokenDigest) credentialsByAccessToken.set(context.accessTokenDigest, credentialDigest);
+  return context;
+}
 // Default to 24 hours (matching HirePool's access token expiration) unless explicitly configured
 const SESSION_TTL_MS = process.env.HIREPOOL_SESSION_TTL_MS
   ? Number.parseInt(process.env.HIREPOOL_SESSION_TTL_MS, 10)
@@ -15,6 +73,7 @@ function digest(value) {
 }
 
 function removeContext(context) {
+  markStateTouched(DELETED, context.credentialDigest);
   contextsByCredential.delete(context.credentialDigest);
   if (credentialsByAccessToken.get(context.accessTokenDigest) === context.credentialDigest) {
     credentialsByAccessToken.delete(context.accessTokenDigest);
@@ -75,6 +134,7 @@ export function storeHirePoolSession(
     existing.lastActiveAt = now;
     existing.expiresAt = now + SESSION_TTL_MS;
     if (refreshToken) existing.refreshToken = refreshToken;
+    markStateTouched(TOUCHED, existing.credentialDigest);
     return toPublicSession(existing);
   }
 
@@ -95,6 +155,7 @@ export function storeHirePoolSession(
   };
   contextsByCredential.set(credentialDigest, context);
   credentialsByAccessToken.set(accessTokenDigest, credentialDigest);
+  markStateTouched(TOUCHED, credentialDigest);
   return toPublicSession(context);
 }
 
@@ -140,6 +201,9 @@ export function touchHirePoolSession(credential, now = Date.now()) {
   if (context && context.expiresAt > now) {
     context.lastActiveAt = now;
     context.expiresAt = now + SESSION_TTL_MS;
+    if (!context.persistedAt || now - context.persistedAt >= TOUCH_PERSIST_INTERVAL_MS) {
+      markStateTouched(TOUCHED, context.credentialDigest);
+    }
     return true;
   }
   return false;
@@ -164,6 +228,7 @@ export function updateHirePoolSessionTokens(sessionId, newAccessToken, newRefres
 
   // Map new access token digest to credential
   credentialsByAccessToken.set(context.accessTokenDigest, context.credentialDigest);
+  markStateTouched(TOUCHED, context.credentialDigest);
   return true;
 }
 

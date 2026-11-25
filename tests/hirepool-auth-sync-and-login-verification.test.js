@@ -231,7 +231,7 @@ test('HirePool Auth Synchronization & Login Verification Suite', async (t) => {
     // Attempt chat with revoked credential
     const chatRes = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${session.credential}`)
       .send({
         assistantId: 'hirepool',

@@ -47,6 +47,10 @@ import {
   isHirePoolAgencyCandidateAddIntent
 } from '../../../integrations/hirepool/agency-candidate-add.js';
 import {
+  handleAgencyCandidateEditTurn,
+  isAgencyCandidateEditIntent
+} from '../../../integrations/hirepool/agency-candidate-edit.js';
+import {
   handleHirePoolAgencyCandidateSubmitTurn,
   isHirePoolAgencyCandidateSubmitIntent
 } from '../../../integrations/hirepool/agency-candidate-submit.js';
@@ -56,9 +60,32 @@ import {
 import {
   HIREPOOL_GROUNDED_KNOWLEDGE_PROMPT,
   HIREPOOL_PUBLIC_TOPICS,
+  HIREPOOL_PRICING_REDIRECT_RESPONSE,
+  isHirePoolPricingQuestion,
   detectHirePoolPublicTopic,
   getHirePoolGroundedFaqResponse
 } from '../../../integrations/hirepool/knowledge-base.js';
+import {
+  createPublicJobSearchAction,
+  formatPublicJobResults,
+  formatPublicJobSearchUnavailable,
+  HIREPOOL_JOB_SEARCH_ACTION,
+  searchPublicHirePoolJobs
+} from '../../../integrations/hirepool/public-jobs.js';
+import { isHirePoolLocalBridgeEnabled } from '../local-integrations/hirepool-auth.js';
+import {
+  buildAccountSummary,
+  formatCandidateDashboard,
+  HIREPOOL_PROFILE_OPERATIONS,
+  isCandidateDashboardRequest
+} from '../../../integrations/hirepool/account-summary.js';
+import {
+  ASSISTANT_SURFACES,
+  getHirePoolAppLoginUrl,
+  resolveAssistantSurface,
+  scopeUserToSurface,
+  surfaceAllowsGuestAccountActions
+} from '../surface.js';
 import {
   ensureHirePoolVisitorState,
   resetHirePoolVisitorForVerifiedUser,
@@ -87,6 +114,13 @@ const HIREPOOL_LOGIN_UNVERIFIED_MESSAGE =
   'I understand that you completed login in another tab, but I still need to verify your HirePool session before accessing your account information.';
 const HIREPOOL_AUTH_LIMITATION_MESSAGE =
   'I can’t verify a HirePool login from this assistant in the current setup, so I can’t retrieve account or application information here. Please use HirePool directly; this assistant has not accessed your account data.';
+const HIREPOOL_WEBSITE_LOGIN_MESSAGE =
+  'You can log in to your HirePool dashboard using the button below. Once you are signed in, the assistant there can help with your profile, jobs, and applications.';
+/** In-app bot when the user is no longer signed in: tell them to log in, with a link. */
+function getAppSignedOutMessage() {
+  return `You're signed out of HirePool. Please [log in again](${getHirePoolAppLoginUrl()}), and I'll be ready to help with your profile, jobs, and applications.`;
+}
+
 const HIREPOOL_MATCHING_OPERATION = 'get_matching_jobs_api_v1_matching_jobs_get';
 const HIREPOOL_SEARCH_JOBS_OPERATION = 'search_jobs_api_v1_jobs_search_get';
 const HIREPOOL_JOB_DETAILS_OPERATION = 'get_job_api_v1_jobs__job_id__get';
@@ -150,7 +184,7 @@ function trackUnverifiedAccountAction(session, actionName, selectedRole = null) 
   visitor.lastUpdatedAt = new Date().toISOString();
 }
 
-function getUnverifiedHirePoolResponse(message, session, registry, signupContext = {}) {
+function getUnverifiedHirePoolResponse(message, session, registry, signupContext = {}, surface = ASSISTANT_SURFACES.LEGACY) {
   const visitor = ensureHirePoolVisitorState(session, { isAuthenticated: false });
 
   if (isHirePoolLoginClaim(message)) {
@@ -182,7 +216,7 @@ function getUnverifiedHirePoolResponse(message, session, registry, signupContext
   // Handle experienced candidate job exploration
   if (/\b(?:\d+\+?\s+years?(?:\s+of)?\s+experience)\b/i.test(message) && /\b(?:actively\s+looking|looking\s+for|seeking|job\s*seeker)\b/i.test(message)) {
     return {
-      text: 'HirePool is a great platform for your job search! With your experience, you can explore opportunities across remote, hybrid, and onsite roles.\n\n- **Free Forever for Candidates:** Unlimited job applications, AI-powered skill matching, and real-time application tracking.\n- **AI Skill Matching:** Once signed in with your profile, our AI matches your skills and experience directly to active employer openings.\n- **Direct Applications:** Connect directly with hiring companies with no placement middleman fees.\n\nWould you like to sign up for a free Candidate account or learn more about how job matching works?'
+      text: 'HirePool is a great platform for your job search! With your experience, you can explore opportunities across remote, hybrid, and onsite roles.\n\n- **Apply With One Profile:** Apply to multiple openings and track every application in real time.\n- **AI Skill Matching:** Once signed in with your profile, our AI matches your skills and experience directly to active employer openings.\n- **Direct Applications:** Connect directly with hiring companies with no placement middleman fees.\n\nWould you like to sign up for a Candidate account or learn more about how job matching works?'
     };
   }
 
@@ -221,8 +255,10 @@ function getUnverifiedHirePoolResponse(message, session, registry, signupContext
     if ((visitor?.signupCardOfferedCount || 0) > 1) {
       text = 'To get started, please let me know which role you would like to sign up as (**Candidate**, **Employer**, or **Consultancy**), or click the sign-up card below to begin in-chat onboarding.';
     } else {
-      text = 'You can sign up for HirePool right here in chat. We offer three account types:\n- **Candidate:** Free forever — find matching jobs, practice AI video interviews, and track applications.\n- **Employer / Company:** Post jobs, review applicants, and run automated candidate screenings.\n- **Consultancy / Staffing Agency:** Manage talent benches, track client submissions, and oversee placements.\n\nWhich role would you like to create an account for?';
+      text = 'You can sign up for HirePool right here in chat. We offer three account types:\n- **Candidate:** Find matching jobs, practice AI video interviews, and track applications.\n- **Employer / Company:** Post jobs, review applicants, and run automated candidate screenings.\n- **Consultancy / Staffing Agency:** Manage talent benches, track client submissions, and oversee placements.\n\nWhich role would you like to create an account for?';
     }
+  } else if (surface === ASSISTANT_SURFACES.WEBSITE) {
+    text = HIREPOOL_WEBSITE_LOGIN_MESSAGE;
   } else {
     text = HIREPOOL_LOGIN_OFFER_MESSAGE;
   }
@@ -241,8 +277,12 @@ function getUnverifiedHirePoolResponse(message, session, registry, signupContext
   };
 }
 
-function addHirePoolGuestLoginAction(registry, assistantId, authUser) {
-  if (assistantId !== 'hirepool' || isVerifiedHirePoolUser(authUser)) {
+function addHirePoolGuestLoginAction(registry, assistantId, authUser, surface = ASSISTANT_SURFACES.LEGACY) {
+  if (
+    assistantId !== 'hirepool' ||
+    isVerifiedHirePoolUser(authUser) ||
+    !surfaceAllowsGuestAccountActions(surface)
+  ) {
     return registry;
   }
 
@@ -280,6 +320,10 @@ function addHirePoolGuestLoginAction(registry, assistantId, authUser) {
       promptGuideline: 'Offer this action ONLY when the visitor asks to register, sign up, join HirePool, or states they do not have an account. Never trigger it automatically on general informational questions.',
       metadata: { hirePoolSignup: true }
     });
+  }
+  // Public job search needs the HirePool API (local-only for now).
+  if (isHirePoolLocalBridgeEnabled() && !requestRegistry.has(HIREPOOL_JOB_SEARCH_ACTION)) {
+    requestRegistry.register(createPublicJobSearchAction());
   }
   return requestRegistry;
 }
@@ -383,9 +427,23 @@ function formatProfileRead(profile) {
         : typeof value !== 'string' || value.trim().length === 0;
     })
     .map(([, label]) => label);
-  lines.push(missing.length
-    ? `Missing required profile information: ${missing.join(', ')}.`
-    : 'The profile-completion required fields are present.');
+  // Required fields alone can be complete while skills, education, and
+  // experience are empty, so say what is still recommended and why.
+  const recommended = [
+    ['skills', 'skills'],
+    ['education', 'education'],
+    ['work_experience', 'work experience']
+  ]
+    .filter(([field]) => !Array.isArray(profile[field]) || profile[field].length === 0)
+    .map(([, label]) => label);
+  if (missing.length) {
+    lines.push(`Missing required profile information: ${missing.join(', ')}.`);
+  } else {
+    lines.push('All required profile fields are filled in.');
+  }
+  if (recommended.length) {
+    lines.push(`Recommended next: add your ${recommended.join(', ').replace(/, ([^,]*)$/, ' and $1')}. These improve your job matches.`);
+  }
   return lines.join('\n');
 }
 
@@ -747,6 +805,23 @@ function looksLikeSerializedJson(text) {
   }
 }
 
+const HIREPOOL_READ_DESCRIPTIONS = Object.freeze({
+  get_matching_jobs_api_v1_matching_jobs_get: 'your matching jobs',
+  search_jobs_api_v1_jobs_search_get: 'the job search',
+  get_job_api_v1_jobs__job_id__get: 'that job',
+  get_my_applications_api_v1_applications_my_applications_get: 'your applications',
+  get_my_profile_api_v1_candidates_profile_get: 'your profile',
+  get_dashboard_stats_api_v1_clients_dashboard_get: 'your dashboard',
+  get_dashboard_stats_api_v1_consultancies_dashboard_get: 'your dashboard',
+  get_my_jobs_api_v1_jobs_my_jobs_get: 'your jobs',
+  list_candidates_api_v1_consultancies_candidates_get: 'your candidates'
+});
+
+/** Plain words for what failed to load, so errors say more than "the requested information". */
+function describeHirePoolRead(operationId) {
+  return HIREPOOL_READ_DESCRIPTIONS[operationId] || 'that information';
+}
+
 export function formatHirePoolReadResults(dynamicResults, requestText = '', submissionContext = null, authUser = null) {
   const applicationHistoryResult = dynamicResults.find(result =>
     result.operationId === HIREPOOL_APPLICATION_HISTORY_OPERATION
@@ -759,7 +834,7 @@ export function formatHirePoolReadResults(dynamicResults, requestText = '', subm
     if (isReadTimeout({ message: failedResult.error })) {
       return 'HirePool took too long to respond, so I could not verify the requested information. Your conversation and selected task are preserved; please try again.';
     }
-    return 'I could not verify the requested HirePool information. No result or status has been assumed; please try again.';
+    return `I could not verify ${describeHirePoolRead(failedResult.operationId)}: HirePool returned an error just now. Nothing was changed and no result has been assumed. Please try again in a moment.`;
   }
   const profileResult = dynamicResults.find(result =>
     result.operationId === 'get_my_profile_api_v1_candidates_profile_get' &&
@@ -1211,26 +1286,36 @@ export async function executeCandidateMatchingWorkflow(
     throw new Error('Application history or screening verification is unavailable; I cannot safely label matching jobs as unapplied.');
   }
 
+  // Application history lets us hide jobs already applied to. If HirePool
+  // cannot return it, still show the matches, clearly labelled as unchecked;
+  // applying stays safe because the apply step re-checks history first.
   const applications = [];
-  let page = 1;
-  let totalPages = 1;
-  do {
-    const response = await execute(historyAction, {
-      query: { page, page_size: 100 }
-    });
-    if (!Array.isArray(response?.items) ||
-        !Number.isInteger(response.total_pages) ||
-        response.total_pages < 0 ||
-        response.total_pages > 20) {
-      throw new Error('HirePool application history is incomplete; I cannot safely label matching jobs as unapplied.');
-    }
-    if (response.total_pages === 0 && response.items.length !== 0) {
-      throw new Error('HirePool returned inconsistent application history; I cannot safely label matching jobs as unapplied.');
-    }
-    applications.push(...response.items);
-    totalPages = response.total_pages;
-    page += 1;
-  } while (page <= totalPages);
+  let historyUnavailable = false;
+  try {
+    let page = 1;
+    let totalPages = 1;
+    do {
+      const response = await execute(historyAction, {
+        query: { page, page_size: 100 }
+      });
+      if (!Array.isArray(response?.items) ||
+          !Number.isInteger(response.total_pages) ||
+          response.total_pages < 0 ||
+          response.total_pages > 20) {
+        throw new Error('HirePool application history is incomplete.');
+      }
+      if (response.total_pages === 0 && response.items.length !== 0) {
+        throw new Error('HirePool returned inconsistent application history.');
+      }
+      applications.push(...response.items);
+      totalPages = response.total_pages;
+      page += 1;
+    } while (page <= totalPages);
+  } catch (error) {
+    if (signal?.aborted) throw error;
+    historyUnavailable = true;
+    applications.length = 0;
+  }
 
   const appliedJobIds = new Set(applications
     .map(application => application?.job_id)
@@ -1270,7 +1355,10 @@ export async function executeCandidateMatchingWorkflow(
   const notes = [
     'HirePool’s candidate matching endpoint evaluated your current profile and returned the scores above.'
   ];
-  return { jobs, notes };
+  if (historyUnavailable) {
+    notes.push('I could not check your application history just now, so some of these may be jobs you have already applied to. Before any application, I check again, so nothing is submitted twice.');
+  }
+  return { jobs, notes, historyUnavailable };
 }
 
 const HIREPOOL_ACTIVE_CANDIDATE_STAGES = new Set([
@@ -1678,6 +1766,9 @@ function resolveHirePoolVerifiedReadIntent(message, authUser, registry) {
       /^(?:please\s+)?(?:show|view|get|list|check|display|see|fetch)\s+(?:all\s+|my\s+|our\s+)?candidates?\s*[.!?]*$/i.test(text)
     ) {
       operationIdOrPredicate = 'list_candidates_api_v1_consultancies_candidates_get';
+    } else if (isGenericJobListRequest(text)) {
+      // Same list as the dashboard's Job Opportunities page (job search with no keyword).
+      operationIdOrPredicate = HIREPOOL_SEARCH_JOBS_OPERATION;
     }
   }
 
@@ -1690,6 +1781,38 @@ function resolveHirePoolVerifiedReadIntent(message, authUser, registry) {
     argumentsValue.query = {};
   }
   return { action, argumentsValue };
+}
+
+/**
+ * "job opportunities", "show open jobs", "any openings?" — a request for the
+ * general job list rather than a search for something specific.
+ */
+export function isGenericJobListRequest(text) {
+  const value = String(text || '').trim().replace(/[.!?]+$/, '');
+  return /^(?:(?:please\s+)?(?:show|view|list|get|see|check|find|display|give\s+me)\s+)?(?:me\s+)?(?:(?:all|the|my|our|any|open|available|current|latest|new|active)\s+)*(?:job\s+)?(?:op+[a-z]{0,2}rtunit(?:y|ies)|openings?|vacanc(?:y|ies)|jobs?(?:\s+(?:list|openings|available))?)(?:\s+(?:available|for\s+(?:me|us|my\s+candidates)|on\s+hirepool))?$/i.test(value) ||
+    /^(?:are\s+there\s+)?any\s+(?:new\s+|open\s+)?(?:jobs?|openings?|opportunit(?:y|ies))(?:\s+(?:available|for\s+(?:me|us)))?$/i.test(value);
+}
+
+const GENERIC_JOB_SEARCH_WORDS = /\b(?:jobs?|op+[a-z]{0,2}rtunit(?:y|ies)|openings?|vacanc(?:y|ies)|positions?|roles?|listings?|available|open|all|any|current|latest|new|active|show|list|find|search|me|my|our|the|for|on|in|hirepool|please)\b/gi;
+
+/**
+ * HirePool's job search matches the keyword inside job titles and descriptions,
+ * so generic words like "job opportunities" return nothing. Keep only real
+ * search terms (e.g. "React developer"); drop the keyword when none remain.
+ */
+export function normalizeHirePoolJobSearchArguments(argumentsValue = {}) {
+  const query = argumentsValue?.query && typeof argumentsValue.query === 'object' ? { ...argumentsValue.query } : null;
+  if (!query || typeof query.query !== 'string') return argumentsValue;
+  let cleaned = query.query.replace(GENERIC_JOB_SEARCH_WORDS, ' ').replace(/[^\w+#.\s-]/g, ' ').replace(/\s+/g, ' ').trim();
+  // City names belong in HirePool's location filter, not the keyword.
+  const city = cleaned.match(/\b(bengaluru|bangalore|mumbai|delhi|hyderabad|pune|chennai|noida|gurgaon|gurugram|kolkata|ahmedabad|kochi|coimbatore|jaipur|chandigarh|remote)\b/i);
+  if (city && !query.locations) {
+    query.locations = city[1].charAt(0).toUpperCase() + city[1].slice(1).toLowerCase();
+    cleaned = cleaned.replace(city[0], ' ').replace(/\s+/g, ' ').trim();
+  }
+  if (cleaned.length >= 2) query.query = cleaned;
+  else delete query.query;
+  return { ...argumentsValue, query };
 }
 
 async function resolveHirePoolDirectApplyByTitle(message, session, registry, authUser, signal) {
@@ -1785,7 +1908,7 @@ Never emit raw \`\`\`action\`\`\` JSON code blocks or fabricated UI action cards
 
 ${HIREPOOL_GROUNDED_KNOWLEDGE_PROMPT}`;
 
-function getSystemInstructionForUser(assistantConfig, assistantId, verifiedHirePoolUser, authUser = null, session = null, signupContext = {}) {
+function getSystemInstructionForUser(assistantConfig, assistantId, verifiedHirePoolUser, authUser = null, session = null, signupContext = {}, surface = ASSISTANT_SURFACES.LEGACY) {
   if (assistantId !== 'hirepool') {
     return assistantConfig.systemInstruction;
   }
@@ -1830,6 +1953,15 @@ For job and candidate hiring management:
 - View company jobs, post new job openings (requiring explicit user confirmation), review applicant submissions, and check hiring dashboard statistics using the client operations.
 Never claim the client account is unauthenticated or redirect an authenticated client user to login.` : '';
 
+    const summary = session?.hirePoolAccountSummary?.userId === authUser.id
+      ? session.hirePoolAccountSummary.text
+      : '';
+    const profileSummaryBlock = summary ? `
+
+[SIGNED-IN USER PROFILE SUMMARY]
+Read from HirePool for this verified user moments ago. Use it to personalise replies (address them by first name) and to answer simple questions about their own account. For anything that must be complete or current (the full profile, dashboard numbers, jobs, applications, candidates), call the matching tool instead of relying on this summary.
+${summary}` : '';
+
     const verifiedToolRules = `
 
 [VERIFIED HIREPOOL TOOL EXECUTION RULES]
@@ -1839,7 +1971,7 @@ Always invoke the registered native function tools directly for HirePool reads a
 
 [VERIFIED HIREPOOL ACCOUNT]
 The SDK backend verified the current HirePool identity against HirePool's authenticated identity endpoint. Use these server-derived values when asked which account or role is signed in. Do not infer identity or role from browser context or user statements.
-${accountDetails}`;
+${accountDetails}${profileSummaryBlock}`;
   }
 
   const visitorContext = getHirePoolVisitorSystemContext(session, {
@@ -1847,7 +1979,18 @@ ${accountDetails}`;
     signupRole: signupContext?.selectedRole || null
   });
 
-  return `${domainHeader}${assistantConfig.systemInstruction || ''}
+  const websiteRules = surface === ASSISTANT_SURFACES.WEBSITE ? `
+
+[HIREPOOL WEBSITE ASSISTANT]
+You are the friendly guide on the public HirePool website. Be warm, upbeat, and conversational; keep answers short (2-5 sentences or a few bullets) and end with one helpful next step or question.
+On this website you can: explain how HirePool works for candidates, employers, and staffing agencies; answer questions using the verified facts; and help visitors sign up for any role. You cannot look up, change, or act on any account, jobs, or applications here. If a visitor wants account-specific help, invite them to log in to their HirePool dashboard, where the in-app assistant can help.
+The chat opened with a welcome that introduced HirePool and asked the visitor what they are looking for (a job, hiring for their company, placing candidates as a staffing agency, or just exploring). Treat short replies such as "a job", "hiring", or "agency" as answers to that question.
+Signing up happens right here in this chat; never send visitors to a separate signup page. When the visitor seems ready, ask exactly once: "**Shall I create your <role> account now?**" (role: candidate, company, or consultancy). A plain "ok" or "yes" to that question starts the signup automatically, so do not ask again.
+Reply format (the chat window is small): start with one short friendly sentence, then at most 3 short bullet points ("- **Label:** detail") when listing things, then one clear next step or question in bold on its own line. No headings, no long paragraphs, no more than about 60 words in total. Use at most one emoji.
+Understand what they need before suggesting anything: ask at most one or two short follow-up questions at a time (for job seekers: the role, key skills, experience, or preferred location and work mode; for companies: the roles they are hiring for and how many; for agencies: the kinds of candidates they place and the industries they serve). Then suggest the most relevant HirePool features for them and the next step, which is usually signing up for the matching account type. Never invent job listings, salaries, or prices.
+For job seekers: first ask what role they are looking for (unless they already said), then once ask where they would like to work and whether they prefer remote, hybrid, or onsite. As soon as you know the role, call the hirepool_search_jobs tool with the role and any location or work mode they gave; do not wait for more details, and do not ask for details they already shared. Never list or describe jobs yourself. If they ask about a specific opening or company, search for it the same way.` : '';
+
+  return `${domainHeader}${assistantConfig.systemInstruction || ''}${websiteRules}
 
 ${visitorContext}
 
@@ -1900,10 +2043,43 @@ async function evaluateHirePoolTurn({
   sessionOptions,
   activeRegistry,
   signupContext,
-  history = []
+  history = [],
+  surface = ASSISTANT_SURFACES.LEGACY
 }) {
   if (assistantId !== 'hirepool') {
     return { handled: false, addMessageOptions: sessionOptions };
+  }
+
+  // Answer to "Shall I create your account now?" (asked after showing jobs).
+  // The offer only applies to the very next message.
+  const signupOffer = session.hirePoolSignupOffer;
+  session.hirePoolSignupOffer = null;
+  if (signupOffer && !verifiedHirePoolUser && surfaceAllowsGuestAccountActions(surface)) {
+    const offerOptions = {
+      ...sessionOptions,
+      scope: 'HIREPOOL_IN_SCOPE',
+      domainCategory: HIREPOOL_DOMAIN_CATEGORIES.HIREPOOL_IN_SCOPE
+    };
+    if (isShortAffirmative(message)) {
+      const response = getUnverifiedHirePoolResponse(
+        signupOffer.role ? `I want to sign up as a ${signupOffer.role}` : 'I want to sign up',
+        session,
+        activeRegistry,
+        signupContext,
+        surface
+      );
+      if (response) {
+        recordGuestResponse(session, message, response, offerOptions);
+        return { handled: true, text: response.text, action: response.action };
+      }
+    } else if (isShortNegative(message)) {
+      const text = signupOffer.source === 'jobs'
+        ? 'No problem! Tell me another role or city and I will look again, or ask me anything about HirePool.'
+        : 'No problem! Ask me anything about HirePool, and you can sign up whenever you are ready.';
+      sessionManager.addMessage(session.id, 'user', message, offerOptions);
+      sessionManager.addMessage(session.id, 'assistant', text, offerOptions);
+      return { handled: true, text };
+    }
   }
 
   const domainClassification = classifyHirePoolMessage(message, session, {
@@ -1965,12 +2141,31 @@ async function evaluateHirePoolTurn({
     return { handled: true, text };
   }
 
+  // Pricing is never quoted: plans are not finalised and differ for individuals.
+  if (!session?.hirePoolProfileEdit?.active && isHirePoolPricingQuestion(message)) {
+    const scopeOptions = {
+      ...sessionOptions,
+      scope: 'HIREPOOL_IN_SCOPE',
+      domainCategory: HIREPOOL_DOMAIN_CATEGORIES.HIREPOOL_IN_SCOPE
+    };
+    sessionManager.addMessage(session.id, 'user', message, scopeOptions);
+    sessionManager.addMessage(session.id, 'assistant', HIREPOOL_PRICING_REDIRECT_RESPONSE, scopeOptions);
+    return { handled: true, text: HIREPOOL_PRICING_REDIRECT_RESPONSE };
+  }
+
+  // The in-app bot only serves verified accounts; it never offers guest login or signup.
+  if (surface === ASSISTANT_SURFACES.APP && !verifiedHirePoolUser && !isHirePoolLogoutRequest(message)) {
+    return { handled: true, text: getAppSignedOutMessage() };
+  }
+
   if (isHirePoolLogoutRequest(message)) {
     if (!verifiedHirePoolUser) {
       sessionManager.destroy(session.id, sessionOptions);
       return {
         handled: true,
-        text: 'You are not currently signed in to a verified HirePool session in this assistant.',
+        text: surface === ASSISTANT_SURFACES.APP
+          ? getAppSignedOutMessage()
+          : 'You are not currently signed in to a verified HirePool session in this assistant.',
         logout: {
           loggedOut: true,
           alreadySignedOut: true,
@@ -1988,9 +2183,12 @@ async function evaluateHirePoolTurn({
       apiBaseUrl: process.env.HIREPOOL_LOCAL_API_BASE_URL || 'http://127.0.0.1:8000'
     });
 
-    const text = revocation.backendRevoked
-      ? 'You have been logged out of HirePool. Your HirePool session and assistant credentials have been revoked, and your conversation state has been cleared.'
-      : 'Your HirePool assistant session and local credentials have been cleared, and your conversation state has been reset to guest mode. However, I could not confirm upstream token revocation with the HirePool server, so if you remain signed in on the main HirePool site, please sign out there as well.';
+    // In the dashboard the app logs out too and shows its login page.
+    const text = surface === ASSISTANT_SURFACES.APP
+      ? `You have been logged out of HirePool. Taking you to the login page… If it doesn't open, [log in again](${getHirePoolAppLoginUrl()}).`
+      : revocation.backendRevoked
+        ? 'You have been logged out of HirePool. Your HirePool session and assistant credentials have been revoked, and your conversation state has been cleared.'
+        : 'Your HirePool assistant session and local credentials have been cleared, and your conversation state has been reset to guest mode. However, I could not confirm upstream token revocation with the HirePool server, so if you remain signed in on the main HirePool site, please sign out there as well.';
 
     return {
       handled: true,
@@ -2026,7 +2224,7 @@ async function evaluateHirePoolTurn({
       signupRole: signupContext?.selectedRole || null
     });
 
-    const guestResponse = getUnverifiedHirePoolResponse(message, session, activeRegistry, signupContext);
+    const guestResponse = getUnverifiedHirePoolResponse(message, session, activeRegistry, signupContext, surface);
     if (guestResponse) {
       recordGuestResponse(session, message, guestResponse, addMessageOptions);
       return {
@@ -2038,6 +2236,34 @@ async function evaluateHirePoolTurn({
   }
 
   return { handled: false, addMessageOptions, domainClassification };
+}
+
+function isShortAffirmative(message) {
+  return /^\s*(?:yes|yeah|yep|yup|sure|ok(?:ay)?|please|yes,?\s*please|go\s+ahead|do\s+it|let'?s\s+do\s+it|create\s+(?:it|one|my\s+account)|sign\s+me\s+up)\s*[.!]*\s*$/i.test(String(message || ''));
+}
+
+/**
+ * Website guests: when the assistant's reply offers to create an account
+ * ("Would you like to set up your consultancy account?"), remember the offer
+ * so a plain "ok" or "yes" starts the in-chat signup for that role.
+ */
+export function detectGuestSignupOffer(text, { session = null, surface, verifiedHirePoolUser = null } = {}) {
+  if (verifiedHirePoolUser || !surfaceAllowsGuestAccountActions(surface)) return null;
+  const reply = String(text || '');
+  const offersAccount =
+    /\b(?:set\s+up|create|open|start|register)\b[^.?!\n]{0,60}\b(?:account|profile|workspace)\b[^?\n]*\?/i.test(reply) ||
+    /\b(?:sign(?:ing)?\s*up|signup|register)\b[^?\n]*\?/i.test(reply);
+  if (!offersAccount) return null;
+  let role = null;
+  if (/\b(?:consultancy|agency|staffing)\b[^.?!\n]{0,20}\baccount\b/i.test(reply)) role = 'consultancy';
+  else if (/\b(?:employer|company|client)\b[^.?!\n]{0,20}\baccount\b/i.test(reply)) role = 'client';
+  else if (/\bcandidate\b[^.?!\n]{0,20}\baccount\b/i.test(reply)) role = 'candidate';
+  role = role || session?.hirePoolVisitor?.selectedRole || null;
+  return { role, at: Date.now() };
+}
+
+function isShortNegative(message) {
+  return /^\s*(?:no|nope|nah|not\s+now|later|maybe\s+later|no,?\s*thanks?|no\s+thank\s+you)\s*[.!]*\s*$/i.test(String(message || ''));
 }
 
 function recordUnverifiedHirePoolHostAction(session, assistantId, verifiedHirePoolUser, hostAction) {
@@ -2401,6 +2627,7 @@ async function processActionOrToolCalls({
   let candidateWorkflowUpdate = null;
   let dynamicReadFailed = false;
   let preparationUserMessage = null;
+  let publicJobSearch = null;
 
   if (Array.isArray(result.toolCalls) && result.toolCalls.length > 0) {
     for (const tc of result.toolCalls) {
@@ -2473,6 +2700,19 @@ async function processActionOrToolCalls({
         }
       }
 
+      // Website bot: public HirePool job search. Results are formatted by the
+      // server below, never by the model, so job details cannot be invented.
+      if (actionDef?.metadata?.hirePoolPublicJobs) {
+        const searchArguments = actionDef.parameterSchema.parse(tc.arguments || {});
+        try {
+          publicJobSearch = { result: await searchPublicHirePoolJobs(searchArguments) };
+        } catch (error) {
+          logRequestError(error);
+          publicJobSearch = { error };
+        }
+        continue;
+      }
+
       // 4. Dispatch through existing dispatchActionProposal
       const proposal = {
         id: tc.id,
@@ -2531,8 +2771,11 @@ async function processActionOrToolCalls({
                     signal
                   );
                 }
+                const readParameters = operationId === HIREPOOL_SEARCH_JOBS_OPERATION
+                  ? normalizeHirePoolJobSearchArguments(proposal.parameters)
+                  : proposal.parameters;
                 return {
-                  jobs: await executeDynamicApiRead(actionDef, proposal.parameters, authUser, { signal })
+                  jobs: await executeDynamicApiRead(actionDef, readParameters, authUser, { signal })
                 };
               });
             const isApplicationHistory =
@@ -2755,6 +2998,25 @@ async function processActionOrToolCalls({
       }
     }
 
+    // Website bot job search: show HirePool's own results, then offer to create the account.
+    if (publicJobSearch) {
+      finalText = publicJobSearch.error
+        ? formatPublicJobSearchUnavailable()
+        : formatPublicJobResults(publicJobSearch.result);
+      const signupAction = activeRegistry.get('hirepool_signup');
+      if (signupAction && !hostAction) {
+        hostAction = {
+          id: `hirepool_signup-${conversationId || 'guest'}`,
+          action: signupAction.name,
+          title: 'Create your HirePool account',
+          explanation: 'Sign up as a candidate right here in chat, then go straight to your dashboard.',
+          parameters: { role: 'candidate' },
+          risk: 'read',
+          requiresConfirmation: true
+        };
+      }
+    }
+
     // Bounded 1-turn follow-up: If tool results were generated (success or error) and no host action waiting for user,
     // invoke model with tool results to synthesize final answer
     if (preparationUserMessage) {
@@ -2878,7 +3140,16 @@ async function processActionOrToolCalls({
             authUser,
             signal
           )
-          : { data: await executeDynamicApiRead(actionDef, resolvedAction.parameters, authUser, { signal }) };
+          : {
+            data: await executeDynamicApiRead(
+              actionDef,
+              operationId === HIREPOOL_SEARCH_JOBS_OPERATION
+                ? normalizeHirePoolJobSearchArguments(resolvedAction.parameters)
+                : resolvedAction.parameters,
+              authUser,
+              { signal }
+            )
+          };
         const wfUpdate = updateCandidateWorkflowFromDynamicResult(
           candidateWorkflowUpdate || candidateWorkflow,
           authUser,
@@ -2943,7 +3214,7 @@ async function processActionOrToolCalls({
         } else {
           finalText = isReadTimeout(error)
             ? 'HirePool took too long to respond, so I could not verify the requested information. Please try again; your conversation is preserved.'
-            : 'I could not verify the requested HirePool information. No result or application status has been assumed; please try again.';
+            : `I could not verify ${describeHirePoolRead(actionDef?.metadata?.dynamicApi?.operationId)}: HirePool returned an error just now. Nothing was changed and no result has been assumed. Please try again in a moment.`;
         }
       }
     } else if (actionDef?.metadata?.dynamicApi) {
@@ -3016,6 +3287,8 @@ async function processActionOrToolCalls({
     isHirePoolAssistant &&
     !isVerifiedHirePoolUser(authUser) &&
     (hostAction?.action === 'hirepool_signup' || hostAction?.action === 'hirepool_login') &&
+    // Job results end by asking "Shall I create one for you now?"; the card is the answer.
+    !publicJobSearch &&
     !isHirePoolSignupRequest(incomingMessage) &&
     !isHirePoolLoginRequest(incomingMessage) &&
     !isHirePoolAccountRequest(incomingMessage)
@@ -3038,7 +3311,48 @@ async function processActionOrToolCalls({
     }
   }
 
-  return { hostAction, connectorResult, finalText, candidateWorkflowUpdate };
+  return {
+    hostAction,
+    connectorResult,
+    finalText,
+    candidateWorkflowUpdate,
+    offeredSignupRole: publicJobSearch && hostAction?.action === 'hirepool_signup' ? 'candidate' : null
+  };
+}
+
+const ACCOUNT_SUMMARY_TTL_MS = 2 * 60 * 1000;
+
+/**
+ * In-app bot: keep a short summary of the signed-in user's profile on the
+ * conversation so the AI knows who it is talking to. Read at most every two
+ * minutes; failures just leave the summary out.
+ */
+async function ensureHirePoolAccountSummary(session, authUser, activeRegistry, signal, message = '') {
+  // Replies answered directly from HirePool data (profile, dashboard, lists) don't use the AI.
+  if (resolveHirePoolVerifiedReadIntent(message, authUser, activeRegistry) ||
+      (authUser.role === 'candidate' && isCandidateDashboardRequest(message))) {
+    return;
+  }
+  const cached = session.hirePoolAccountSummary;
+  if (cached?.userId === authUser.id && Date.now() - cached.at < ACCOUNT_SUMMARY_TTL_MS) return;
+  const ops = HIREPOOL_PROFILE_OPERATIONS[authUser.role] || {};
+  const read = async operationId => {
+    const action = operationId && findDynamicActionByOperationId(activeRegistry, operationId);
+    if (!action) return null;
+    try {
+      const data = await executeDynamicApiRead(action, {}, authUser, { signal });
+      return data && typeof data === 'object' && !Array.isArray(data) ? data : null;
+    } catch {
+      return null;
+    }
+  };
+  const [profile, userProfile] = await Promise.all([read(ops.profile), read(ops.userProfile)]);
+  if (!profile && !userProfile) return;
+  session.hirePoolAccountSummary = {
+    userId: authUser.id,
+    at: Date.now(),
+    text: buildAccountSummary(authUser.role, { profile, userProfile })
+  };
 }
 
 function getNativeToolsForTurn(activeRegistry, permissions, { assistantId, verifiedHirePoolUser, message }) {
@@ -3049,7 +3363,9 @@ function getNativeToolsForTurn(activeRegistry, permissions, { assistantId, verif
     !isHirePoolLoginRequest(message) &&
     !isHirePoolAccountRequest(message)
   ) {
-    return [];
+    // Guests get only the read-only public job search tool (website bot).
+    const search = activeRegistry.get(HIREPOOL_JOB_SEARCH_ACTION);
+    return search ? registryToOpenAITools(new ActionRegistry({ actions: [search] }), permissions) : [];
   }
   return registryToOpenAITools(activeRegistry, permissions);
 }
@@ -3091,7 +3407,28 @@ async function resolveHirePoolPreModelTurn({
         : '';
       return {
         handled: true,
-        text: `Viewing and managing formal job offers is not currently supported through the AI assistant. Please check the **HirePool Candidate Portal** directly at https://hirepool.ai to view, accept, or decline any job offers extended to you by employers.${suspendedNotice}`
+        text: `Viewing and managing formal job offers is not currently supported through the AI assistant. Please open the **Offers** page in your HirePool dashboard to view, accept, or decline any job offers extended to you by employers.${suspendedNotice}`
+      };
+    }
+
+    // Candidate "dashboard": profile completeness plus their own application history.
+    if (authUser.role === 'candidate' && isCandidateDashboardRequest(message)) {
+      const profileAction = findDynamicActionByOperationId(activeRegistry, HIREPOOL_CANDIDATE_PROFILE_OPERATION);
+      const historyAction = findDynamicActionByOperationId(activeRegistry, HIREPOOL_APPLICATION_HISTORY_OPERATION);
+      const [profile, history] = await Promise.all([
+        profileAction
+          ? executeDynamicApiRead(profileAction, {}, authUser, { signal }).catch(() => null)
+          : null,
+        historyAction
+          ? executeCandidateApplicationHistoryWorkflow(historyAction, {}, authUser, signal).catch(() => null)
+          : null
+      ]);
+      return {
+        handled: true,
+        text: formatCandidateDashboard({
+          profile: profile && typeof profile === 'object' ? profile : null,
+          applications: history?.data || null
+        })
       };
     }
 
@@ -3201,6 +3538,48 @@ async function resolveHirePoolPreModelTurn({
     }
 
     if (authUser.role === 'consultancy') {
+      // Changes to a candidate already on the bench ("add phone number to this candidate").
+      // Checked first so they never fall through to the agency user's own profile edit.
+      // While a new candidate is still being added (or awaits confirmation), changes go into that draft.
+      const addDraftOpen = Boolean(session.consultancyCandidateDraft?.active);
+      if (!addDraftOpen && isAgencyCandidateEditIntent(message, session, authUser)) {
+        const findCandidates = async query => {
+          const listAction = findDynamicActionByOperationId(activeRegistry, 'list_candidates_api_v1_consultancies_candidates_get');
+          if (!listAction) throw new Error('Bench search is unavailable.');
+          const data = await executeDynamicApiRead(listAction, { query: { query, page_size: 10 } }, authUser, { signal });
+          return Array.isArray(data?.items) ? data.items : (Array.isArray(data) ? data : []);
+        };
+        const stageCandidateUpdate = async ({ candidateId, body, name, label }) => {
+          const updateAction = findDynamicActionByOperationId(activeRegistry, 'update_candidate_api_v1_consultancies_candidates__candidate_id__put');
+          if (!updateAction) throw new Error('updating bench candidates is unavailable right now.');
+          const staged = await stageDynamicApiConfirmation(
+            updateAction,
+            // OpenAPI path parameters go under `path` (see buildOperationUrl).
+            { path: { candidate_id: candidateId }, body },
+            authUser,
+            { readActions: activeRegistry.list(), conversationId: session.id, signal }
+          );
+          if (!staged.ready) throw new Error(staged.reviewMessage || 'the value was not accepted.');
+          return {
+            hostAction: {
+              id: staged.confirmationToken,
+              action: updateAction.name,
+              title: `Update ${name}`,
+              explanation: `Update ${name}'s ${label}.`,
+              parameters: staged.parameters,
+              formattedReview: null,
+              risk: updateAction.risk || 'write',
+              requiresConfirmation: true,
+              confirmationToken: staged.confirmationToken
+            }
+          };
+        };
+        const editResult = await handleAgencyCandidateEditTurn({ message, session, findCandidates, stageCandidateUpdate });
+        if (editResult?.handled) {
+          return { handled: true, text: editResult.text, action: editResult.hostAction || undefined };
+        }
+      }
+
       const isCandidateAdd = isHirePoolAgencyCandidateAddIntent(message, session, authUser);
       if (isCandidateAdd) {
         const stageCandidateAddConfirmation = async ({ body }) => {
@@ -3390,7 +3769,8 @@ chatRouter.post('/', async (req, res, next) => {
     const validated = ChatRequestSchema.parse(req.body);
     const { assistantId, message, context, conversationId, history, parameters, connectorAuth } = validated;
 
-    const authUser = req.user;
+    const surface = resolveAssistantSurface(req);
+    const authUser = scopeUserToSurface(req.user, surface, assistantId);
     if (authUser?.credential) {
       touchHirePoolSession(authUser.credential);
     }
@@ -3408,7 +3788,7 @@ chatRouter.post('/', async (req, res, next) => {
       getAssistantActionRegistry(assistantId),
       { signal: abortController.signal }
     );
-    const activeRegistry = addHirePoolGuestLoginAction(dynamicRegistry, assistantId, authUser);
+    const activeRegistry = addHirePoolGuestLoginAction(dynamicRegistry, assistantId, authUser, surface);
     const permissions = authUser?.scopes || [];
 
     if (context !== undefined) {
@@ -3427,7 +3807,8 @@ chatRouter.post('/', async (req, res, next) => {
       sessionOptions,
       activeRegistry,
       signupContext,
-      history
+      history,
+      surface
     });
     if (earlyTurn.handled) {
       res.json({
@@ -3442,6 +3823,9 @@ chatRouter.post('/', async (req, res, next) => {
       return;
     }
 
+    if (verifiedHirePoolUser) {
+      await ensureHirePoolAccountSummary(session, authUser, activeRegistry, abortController.signal, message);
+    }
     const nativeTools = getNativeToolsForTurn(activeRegistry, permissions, {
       assistantId,
       verifiedHirePoolUser,
@@ -3449,7 +3833,7 @@ chatRouter.post('/', async (req, res, next) => {
     });
 
     const systemInstruction = buildSystemInstruction(
-      getSystemInstructionForUser(assistantConfig, assistantId, verifiedHirePoolUser, authUser, session, signupContext),
+      getSystemInstructionForUser(assistantConfig, assistantId, verifiedHirePoolUser, authUser, session, signupContext, surface),
       activeContext,
       activeRegistry,
       documents,
@@ -3493,7 +3877,7 @@ chatRouter.post('/', async (req, res, next) => {
         signal: abortController.signal
       });
 
-    const { hostAction, connectorResult, finalText: rawFinalText, candidateWorkflowUpdate } = await processActionOrToolCalls({
+    const { hostAction, connectorResult, finalText: rawFinalText, candidateWorkflowUpdate, offeredSignupRole } = await processActionOrToolCalls({
       result,
       activeRegistry,
       connectorAuth,
@@ -3513,6 +3897,12 @@ chatRouter.post('/', async (req, res, next) => {
       : rawFinalText;
     applyCandidateWorkflowUpdate(session, candidateWorkflowUpdate);
     recordUnverifiedHirePoolHostAction(session, assistantId, verifiedHirePoolUser, hostAction);
+    // Remember the open "Shall I create your account?" question for a plain "yes".
+    session.hirePoolSignupOffer = offeredSignupRole
+      ? { role: offeredSignupRole, at: Date.now(), source: 'jobs' }
+      : (assistantId === 'hirepool' && !hostAction
+        ? detectGuestSignupOffer(finalText, { session, surface, verifiedHirePoolUser })
+        : null);
 
     // Update server-side session history
     sessionManager.addMessage(session.id, 'user', message, earlyTurn.addMessageOptions);
@@ -3551,7 +3941,8 @@ chatRouter.post('/stream', async (req, res, next) => {
     const validated = ChatRequestSchema.parse(req.body);
     const { assistantId, message, context, conversationId, history, parameters, connectorAuth } = validated;
 
-    const authUser = req.user;
+    const surface = resolveAssistantSurface(req);
+    const authUser = scopeUserToSurface(req.user, surface, assistantId);
     if (authUser?.credential) {
       touchHirePoolSession(authUser.credential);
     }
@@ -3569,7 +3960,7 @@ chatRouter.post('/stream', async (req, res, next) => {
       getAssistantActionRegistry(assistantId),
       { signal: abortController.signal }
     );
-    const activeRegistry = addHirePoolGuestLoginAction(dynamicRegistry, assistantId, authUser);
+    const activeRegistry = addHirePoolGuestLoginAction(dynamicRegistry, assistantId, authUser, surface);
     const permissions = authUser?.scopes || [];
 
     if (context !== undefined) {
@@ -3588,9 +3979,13 @@ chatRouter.post('/stream', async (req, res, next) => {
       sessionOptions,
       activeRegistry,
       signupContext,
-      history
+      history,
+      surface
     });
 
+    if (verifiedHirePoolUser && !earlyTurn.handled) {
+      await ensureHirePoolAccountSummary(session, authUser, activeRegistry, abortController.signal, message);
+    }
     const nativeTools = !earlyTurn.handled
       ? getNativeToolsForTurn(activeRegistry, permissions, {
           assistantId,
@@ -3601,7 +3996,7 @@ chatRouter.post('/stream', async (req, res, next) => {
 
     const systemInstruction = !earlyTurn.handled
       ? buildSystemInstruction(
-          getSystemInstructionForUser(assistantConfig, assistantId, verifiedHirePoolUser, authUser, session, signupContext),
+          getSystemInstructionForUser(assistantConfig, assistantId, verifiedHirePoolUser, authUser, session, signupContext, surface),
           activeContext,
           activeRegistry,
           documents,
@@ -3703,7 +4098,7 @@ chatRouter.post('/stream', async (req, res, next) => {
       };
     }
 
-    const { hostAction, connectorResult, finalText: rawFinalText, candidateWorkflowUpdate } = await processActionOrToolCalls({
+    const { hostAction, connectorResult, finalText: rawFinalText, candidateWorkflowUpdate, offeredSignupRole } = await processActionOrToolCalls({
       result: candidateResult,
       activeRegistry,
       connectorAuth,
@@ -3723,6 +4118,12 @@ chatRouter.post('/stream', async (req, res, next) => {
       : rawFinalText;
     applyCandidateWorkflowUpdate(session, candidateWorkflowUpdate);
     recordUnverifiedHirePoolHostAction(session, assistantId, verifiedHirePoolUser, hostAction);
+    // Remember the open "Shall I create your account?" question for a plain "yes".
+    session.hirePoolSignupOffer = offeredSignupRole
+      ? { role: offeredSignupRole, at: Date.now(), source: 'jobs' }
+      : (assistantId === 'hirepool' && !hostAction
+        ? detectGuestSignupOffer(finalText, { session, surface, verifiedHirePoolUser })
+        : null);
 
     // Update session history
     sessionManager.addMessage(session.id, 'user', message, earlyTurn.addMessageOptions);
@@ -3771,6 +4172,8 @@ chatRouter.post('/stream', async (req, res, next) => {
       res.write(`data: ${JSON.stringify({
         type: 'error',
         error: {
+          // The status lets the widget pick the right friendly message and next step.
+          status: statusCode,
           code: statusCode >= 500 ? 'STREAM_ERROR' : (err.code || 'STREAM_ERROR'),
           message: process.env.NODE_ENV === 'production' && statusCode >= 500
             ? 'An internal server error occurred. Please try again later.'

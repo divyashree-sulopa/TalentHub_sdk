@@ -502,7 +502,7 @@ test('HirePool Phase 1: Visitor Context, Auth Routing & Signup Continuity Suite'
     const authConvo = `auth-convo-${Date.now()}`;
     const u1Res = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${user1Session.credential}`)
       .send({ assistantId: 'hirepool', message: 'How does matching work?', conversationId: authConvo });
     assert.equal(u1Res.status, 200);
@@ -510,7 +510,7 @@ test('HirePool Phase 1: Visitor Context, Auth Routing & Signup Continuity Suite'
 
     const u2Forbidden = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${user2Session.credential}`)
       .send({ assistantId: 'hirepool', message: 'Hello', conversationId: authConvo });
     assert.equal(u2Forbidden.status, 403);

@@ -341,7 +341,8 @@ test('Workflow 1: Asking "My offers?" while in active profile edit suspends work
   // Must NOT ask for company name or job title!
   assert.doesNotMatch(turn2.text, /company\s+name|job\s+title\s+\/\s+role/i);
   // Must explain that offers are viewed in candidate portal
-  assert.match(turn2.text, /offers.*portal|candidate\s+portal/i);
+  assert.match(turn2.text, /offers.*(?:portal|dashboard)|candidate\s+portal/i);
+  assert.doesNotMatch(turn2.text, /https:\/\/(?:app\.)?hirepool\.ai/);
   // Must note that profile edit is paused
   assert.match(turn2.text, /paused|resume/i);
 

@@ -1,6 +1,19 @@
 import { randomUUID } from 'crypto';
 import { SERVER_DEFAULTS } from '../../config/defaults.js';
 import { filterOutOfScopeMessages, summarizeEarlierHistory } from './history-manager.js';
+import {
+  getStateStore,
+  markStateTouched,
+  registerStateFlushHandler,
+  stateDigest
+} from './state/state-store.js';
+
+const CONVERSATION_NAMESPACE = 'conversation';
+const USER_INDEX_NAMESPACE = 'conversation-user';
+const TOUCHED = 'conversation';
+const DELETED = 'conversation-deleted';
+const USER_DELETED = 'conversation-user-deleted';
+const MAX_INDEXED_CONVERSATIONS = 50;
 
 /**
  * Error thrown when an unauthorized user attempts to access a session owned by another user.
@@ -66,9 +79,68 @@ export class SessionManager {
     if (Date.now() - session.lastActiveAt > this.ttlMs) {
       this.sessions.delete(id);
       this.expiredSessions.set(id, Date.now() + this.ttlMs);
+      markStateTouched(DELETED, id);
       return null;
     }
+    // Callers may change the session object directly; save it when the request ends.
+    markStateTouched(TOUCHED, id);
     return session;
+  }
+
+  /**
+   * Load a conversation saved by another server instance (Redis only).
+   * No-op when shared state is not configured or the conversation is in memory.
+   * @param {string} conversationId
+   */
+  async hydrate(conversationId) {
+    if (typeof conversationId !== 'string' || !conversationId.trim() || conversationId.length > 128) return null;
+    const store = getStateStore();
+    if (!store.shared) return null;
+    const id = conversationId.trim();
+    if (this.sessions.has(id)) return this.sessions.get(id);
+    const record = await store.getJson(CONVERSATION_NAMESPACE, id);
+    if (!record || record.id !== id) return null;
+    if (Date.now() - record.lastActiveAt > this.ttlMs) return null;
+    this.sessions.set(id, record);
+    return record;
+  }
+
+  async _flushState(scope) {
+    const store = getStateStore();
+    const writes = [];
+    const indexAdds = new Map();
+    for (const id of scope.get(TOUCHED) || []) {
+      const session = this.sessions.get(id);
+      if (!session) continue;
+      writes.push(store.setJson(CONVERSATION_NAMESPACE, id, session, this.ttlMs));
+      if (session.userId) {
+        const key = stateDigest(session.userId);
+        if (!indexAdds.has(key)) indexAdds.set(key, new Set());
+        indexAdds.get(key).add(id);
+      }
+    }
+    for (const id of scope.get(DELETED) || []) {
+      writes.push(store.delete(CONVERSATION_NAMESPACE, id));
+    }
+    // A per-user index lets logout clear conversations held by other instances.
+    for (const [userKey, ids] of indexAdds) {
+      writes.push((async () => {
+        const existing = (await store.getJson(USER_INDEX_NAMESPACE, userKey)) || [];
+        const merged = [...new Set([...existing, ...ids])].slice(-MAX_INDEXED_CONVERSATIONS);
+        await store.setJson(USER_INDEX_NAMESPACE, userKey, merged, this.ttlMs);
+      })());
+    }
+    for (const userId of scope.get(USER_DELETED) || []) {
+      writes.push((async () => {
+        const userKey = stateDigest(userId);
+        const ids = (await store.getJson(USER_INDEX_NAMESPACE, userKey)) || [];
+        await Promise.all([
+          ...ids.map(id => store.delete(CONVERSATION_NAMESPACE, id)),
+          store.delete(USER_INDEX_NAMESPACE, userKey)
+        ]);
+      })());
+    }
+    await Promise.all(writes);
   }
 
   _cleanupExpiredSessionMarkers(now = Date.now()) {
@@ -173,6 +245,7 @@ export class SessionManager {
     };
 
     this.sessions.set(id, session);
+    markStateTouched(TOUCHED, id);
     return session;
   }
 
@@ -322,7 +395,8 @@ export class SessionManager {
    * @param {object} [options]
    */
   addDocument(conversationId, docData, options = {}) {
-    const session = this.getOrCreate(conversationId, 'default', options);
+    // Use the caller's assistant: a hard-coded 'default' made every non-default assistant's upload fail.
+    const session = this.getOrCreate(conversationId, options.assistantId || 'default', options);
     if (!Array.isArray(session.documents)) {
       session.documents = [];
     }
@@ -419,6 +493,7 @@ export class SessionManager {
     const session = this._getActiveSession(conversationId);
     if (session) {
       this.validateOwnership(session, options);
+      markStateTouched(DELETED, conversationId);
       return this.sessions.delete(conversationId);
     }
     return false;
@@ -436,9 +511,12 @@ export class SessionManager {
     for (const [id, session] of this.sessions.entries()) {
       if (session.userId === userId && (!assistantId || session.assistantId === assistantId)) {
         this.sessions.delete(id);
+        markStateTouched(DELETED, id);
         removed += 1;
       }
     }
+    // Conversations saved by other instances are removed through the user index.
+    markStateTouched(USER_DELETED, userId);
     return removed;
   }
 
@@ -478,3 +556,4 @@ export class SessionManager {
 }
 
 export const sessionManager = new SessionManager();
+registerStateFlushHandler(scope => sessionManager._flushState(scope));

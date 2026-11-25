@@ -748,8 +748,11 @@ describe('HirePool Form Validation Parity Suite', () => {
       assert.strictEqual(compRes.status, 200);
       const compData = await compRes.json();
       assert.strictEqual(compData.status, 'success');
-      assert.strictEqual(compData.profile.consultancy_name, 'Apex Staffing');
-      assert.strictEqual(compData.profile.primary_contact.phone, '9876543210');
+      // Website signup ends with a link to the HirePool app; no assistant login is created here.
+      assert.strictEqual(compData.handoff.type, 'app');
+      assert.strictEqual(compData.handoff.url, 'http://localhost:5173/consultancy/dashboard');
+      assert.strictEqual(compData.handoff.role, 'consultancy');
+      assert.strictEqual(compData.credential, undefined);
     });
 
     it('teardown mock server', async () => {

@@ -19,9 +19,11 @@ import {
   createHirePoolPageContext,
 } from "./hirepool-bridge.js";
 import {
+  isHirePoolAppUrl,
   isHirePoolLocalPublicSiteUrl,
   isHirePoolPublicSiteUrl,
 } from "../../config/hirepool-site-policy.js";
+import { HirePoolAppSession } from "./hirepool-app-session.js";
 
 /**
  * Event emitter for SDK lifecycle and conversation events
@@ -101,13 +103,10 @@ class AssistantSDK {
   }
 
   _isDemoPage() {
-    if (typeof window === "undefined") return false;
-    const { pathname, hostname } = window.location;
-    return (
-      pathname.startsWith("/demo") ||
-      pathname === "/demo" ||
-      hostname.endsWith(".vercel.app")
-    );
+    if (typeof window === "undefined" || !window.location) return false;
+    const pathname = String(window.location.pathname || "");
+    const hostname = String(window.location.hostname || "");
+    return pathname.startsWith("/demo") || hostname.endsWith(".vercel.app");
   }
 
   /**
@@ -146,7 +145,21 @@ class AssistantSDK {
       );
     }
     const isDemo = this._isDemoPage();
+    // In-app bot: the logged-in HirePool app passes hirePoolApp.getAccessToken.
+    const hirePoolApp =
+      assistantId === "hirepool" && options.hirePoolApp ? options.hirePoolApp : null;
     if (
+      hirePoolApp &&
+      typeof window !== "undefined" &&
+      !isDemo &&
+      !isHirePoolAppUrl(window.location.href)
+    ) {
+      throw new Error(
+        "The in-app HirePool assistant is available only inside the HirePool app",
+      );
+    }
+    if (
+      !hirePoolApp &&
       assistantId === "hirepool" &&
       typeof window !== "undefined" &&
       !isDemo &&
@@ -180,7 +193,22 @@ class AssistantSDK {
         );
       }
     }
-    if (assistantId === "hirepool" || assistantId === "default") {
+    if (hirePoolApp) {
+      this._hirePoolAppSession = new HirePoolAppSession({
+        apiUrl,
+        getAccessToken: hirePoolApp.getAccessToken,
+      });
+      options.integration = this._hirePoolAppSession.getHostIntegrationConfig(this);
+      this._explicitPresentation = {
+        name: options.name,
+        greeting: options.greeting,
+        suggestedPrompts: options.suggestedPrompts,
+      };
+      if (!options.name) options.name = "HirePool Assistant";
+      if (!options.context && typeof window !== "undefined") {
+        options.context = { surface: "app", page: window.location.pathname };
+      }
+    } else if (assistantId === "hirepool" || assistantId === "default") {
       if (!this._hirePoolBridge) {
         this._hirePoolBridge = new HirePoolBridge(this, {
           initialPath:
@@ -191,6 +219,13 @@ class AssistantSDK {
       if (!options.integration) {
         options.integration = this._hirePoolBridge.getHostIntegrationConfig();
       }
+      // Remember what the host set itself, so the server's website/app wording
+      // can replace the generic HirePool defaults below.
+      this._explicitPresentation = {
+        name: options.name,
+        greeting: options.greeting,
+        suggestedPrompts: options.suggestedPrompts,
+      };
       if (!options.greeting) options.greeting = HIREPOOL_ASSISTANT_GREETING;
       if (!options.suggestedPrompts)
         options.suggestedPrompts = HIREPOOL_GUEST_SUGGESTED_PROMPTS;
@@ -211,7 +246,7 @@ class AssistantSDK {
 
     this.integration = integration;
     this.actionHandlers.clear();
-    if (assistantId === "hirepool" || assistantId === "default") {
+    if (!hirePoolApp && (assistantId === "hirepool" || assistantId === "default")) {
       this.actionHandlers.set(HIREPOOL_LOGIN_ACTION, () =>
         openHirePoolLogin({
           currentUrl: window.location.href,
@@ -249,8 +284,28 @@ class AssistantSDK {
       );
     }
 
+    // HirePool website/app surfaces: server wording wins over generic defaults,
+    // but never over values the host passed explicitly.
+    const surface =
+      serverConfig.surface === "website" || serverConfig.surface === "app"
+        ? serverConfig.surface
+        : null;
+    if (surface && this._explicitPresentation) {
+      const explicit = this._explicitPresentation;
+      if (!explicit.name && serverConfig.name) options.name = serverConfig.name;
+      if (!explicit.greeting && serverConfig.greeting)
+        options.greeting = serverConfig.greeting;
+      if (!explicit.suggestedPrompts && Array.isArray(serverConfig.suggestedPrompts))
+        options.suggestedPrompts = serverConfig.suggestedPrompts;
+    }
+
     // Merge configurations (server configuration merged with client runtime overrides)
     this.config = {
+      surface,
+      behavior:
+        serverConfig.behavior && typeof serverConfig.behavior === "object"
+          ? serverConfig.behavior
+          : {},
       assistantId,
       apiUrl,
       name: options.name || serverConfig.name || "HirePool Assistant",
@@ -299,10 +354,86 @@ class AssistantSDK {
     this._setupIntegrationHooks();
     this.widgetUI.mount(cssText);
 
+    // In-app bot: "logout" in the chat ends the HirePool session, so the app
+    // must log out too. Stop using the old credential and tell the host app.
+    if (this._hirePoolAppSession) {
+      const onSignOut =
+        typeof hirePoolApp?.onSignOut === "function" ? hirePoolApp.onSignOut : null;
+      // A request was rejected as signed out: get a fresh assistant login from
+      // the app's current token before the widget's single retry.
+      this._profileWasIncomplete = true;
+      this.widgetUI.setProfileFormHandlers?.({
+        load: (mode) => this._profileFormRequest("GET", mode),
+        save: (values) => this._profileFormRequest("POST", null, values),
+      });
+      // Agency dashboard: resumes -> bench, bench -> a job.
+      this.widgetUI.setAssistantHandlers?.({
+        addCandidate: (candidate) =>
+          this._assistantRequest("POST", "bench-candidates", { candidate }, { acceptStatuses: [422] }),
+        listJobs: () => this._assistantRequest("GET", "agency-jobs").then((data) => (Array.isArray(data?.jobs) ? data.jobs : [])),
+        submit: (jobId, candidateIds) => this._assistantRequest("POST", "bench-submit", { jobId, candidateIds }),
+      });
+      // The profile can also change in the dashboard itself: re-check when the chat is opened
+      // (at most every 10 seconds) so the progress card never shows an old percentage.
+      let lastProgressCheck = 0;
+      this.events.on("open", () => {
+        if (Date.now() - lastProgressCheck < 10000) return;
+        lastProgressCheck = Date.now();
+        this._fetchHirePoolAppWelcome()
+          .then((loaded) => {
+            if (loaded) this.widgetUI?.updateProfileProgress?.(loaded.welcome.profileProgress || null);
+          })
+          .catch(() => {});
+      });
+      // After the profile form saves, refresh the welcome's progress with the real numbers.
+      this.events.on("profile-form:saved", () => {
+        this._fetchHirePoolAppWelcome()
+          .then((loaded) => {
+            if (loaded) this.widgetUI?.updateProfileProgress?.(loaded.welcome.profileProgress || null);
+            this._profileWasIncomplete = Boolean(loaded?.welcome?.profileNudge);
+          })
+          .catch(() => {});
+      });
+      this.events.on("action:success", (event) => {
+        // Profile updates (all three roles) come back with a verified profile read.
+        const data = event?.result?.data || event?.result;
+        if (data?.verifiedProfile && data?.verificationStatus === "verified") {
+          setTimeout(() => {
+            this._continueProfileCompletion().catch(() => {});
+          }, 1200);
+        }
+      });
+      this.events.on("auth:refresh-needed", () => {
+        this._hirePoolAppSession?.invalidate();
+      });
+      this.events.on("auth:logout", () => {
+        const appSession = this._hirePoolAppSession;
+        if (appSession) {
+          appSession.ended = true;
+          appSession.invalidate();
+        }
+        if (onSignOut) {
+          // Give the user a moment to read the confirmation first.
+          setTimeout(() => {
+            try {
+              onSignOut();
+            } catch (error) {
+              console.error("[AssistantSDK] The app could not complete sign-out.", error);
+            }
+          }, 1500);
+        }
+      });
+    }
+
     this.initialized = true;
     this.refreshHostIdentity().catch((error) =>
       this.events.emit("error", error),
     );
+    if (this._hirePoolAppSession) {
+      this._loadHirePoolAppWelcome().catch((error) =>
+        this.events.emit("error", error),
+      );
+    }
     this.events.emit("ready", { assistantId, config: this.config });
 
     return this;
@@ -516,6 +647,204 @@ class AssistantSDK {
     this.widgetUI._persistState();
     if (!this.widgetUI.isOpen) this.widgetUI.open();
     return this.widgetUI.sendMessage(message, { displayUserMessage: false });
+  }
+
+  /**
+   * In-app bot: personal greeting and the next missing profile detail.
+   * Falls back silently to the server's generic app greeting on any error.
+   */
+  /** In-app bot: fetch the personal greeting and the profile-completeness check. */
+  async _fetchHirePoolAppWelcome() {
+    const session = await this._hirePoolAppSession?.getSession().catch(() => null);
+    if (!session?.credential || !this.widgetUI) return null;
+    const hour = new Date().getHours();
+    const response = await fetch(
+      `${this.config.apiUrl || ""}/api/hirepool/assistant/welcome?hour=${hour}`,
+      {
+        headers: { Authorization: `Bearer ${session.credential}` },
+        credentials: "omit",
+        cache: "no-store",
+      },
+    );
+    if (!response.ok) return null;
+    return { welcome: await response.json(), session };
+  }
+
+  /** In-app bot: load (GET) or save (POST) the profile form. */
+  _profileFormRequest(method, mode = "all", values = null) {
+    return method === "GET"
+      ? this._assistantRequest("GET", `profile-form?mode=${mode === "missing" ? "missing" : "all"}`)
+      : this._assistantRequest("POST", "profile-form", { values });
+  }
+
+  /**
+   * In-app bot: call /api/hirepool/assistant/<path> with the signed-in user's
+   * assistant credential. Errors carry a friendly `message` and, for invalid
+   * input, per-field `fields`. Statuses in `acceptStatuses` return their body.
+   */
+  async _assistantRequest(method, path, body = null, { acceptStatuses = [] } = {}) {
+    const session = await this._hirePoolAppSession?.getSession().catch(() => null);
+    if (!session?.credential) {
+      throw new Error("Please log in to HirePool again to continue.");
+    }
+    const url = `${this.config.apiUrl || ""}/api/hirepool/assistant/${path}`;
+    const values = body;
+    let response;
+    try {
+      response = await fetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${session.credential}`,
+          ...(method === "POST" ? { "Content-Type": "application/json" } : {}),
+        },
+        body: method === "POST" ? JSON.stringify(values || {}) : undefined,
+        credentials: "omit",
+        cache: "no-store",
+      });
+    } catch {
+      const offline = typeof navigator !== "undefined" && navigator.onLine === false;
+      throw new Error(
+        offline
+          ? "You seem to be offline. Check your connection and try again."
+          : "I couldn't reach the HirePool assistant service just now. Please try again in a moment.",
+      );
+    }
+    const data = await response.json().catch(() => null);
+    if (!response.ok && acceptStatuses.includes(response.status) && data) return data;
+    if (!response.ok) {
+      if (response.status === 401) this._hirePoolAppSession?.invalidate();
+      const error = new Error(data?.error?.message || data?.message || "Something went wrong. Please try again.");
+      error.fields = data?.error?.fields || null;
+      error.status = response.status;
+      throw error;
+    }
+    return data;
+  }
+
+  /**
+   * Pages where the assistant must never pop up (tests, interviews, offers, onboarding).
+   */
+  _isQuietPage() {
+    const path = typeof window !== "undefined" ? window.location.pathname : "";
+    return /\/(?:screening|ai-interview|interview|video|offers?|onboarding|bgv|joining|checkin)(?:\/|$)/i.test(path);
+  }
+
+  /**
+   * In-app bot: personal greeting, and — while the profile is incomplete — open
+   * the assistant once per login session with the list of missing fields.
+   * Falls back silently to the server's generic app greeting on any error.
+   */
+  async _loadHirePoolAppWelcome() {
+    const loaded = await this._fetchHirePoolAppWelcome();
+    if (!loaded || !this.widgetUI) return;
+    const { welcome, session } = loaded;
+    this.widgetUI.setUserRole?.(welcome.role || session.identity?.userType || null);
+    const userKey = String(session.identity?.id || "user").slice(0, 80);
+    const explicit = this._explicitPresentation || {};
+    if (!explicit.greeting && typeof welcome.greeting === "string") {
+      this.widgetUI.setGreeting(
+        welcome.greeting,
+        explicit.suggestedPrompts ||
+          (Array.isArray(welcome.suggestedPrompts) ? welcome.suggestedPrompts : []),
+      );
+    }
+
+    // Reasons to pop the assistant open: the first dashboard visit in this
+    // browser (e.g. right after signup), or an incomplete profile (once per
+    // login session). Either way it opens only after 30 seconds on the page.
+    const firstVisitKey = `hirepool-assistant:dashboard-welcomed:${userKey}`;
+    const profilePopupKey = `hirepool-assistant:profile-popup:${userKey}`;
+    let firstVisit = false;
+    let profilePopup = false;
+    // Interactive welcome (task cards + profile progress) when no conversation is under way;
+    // otherwise the separate reminder card, once per login session.
+    const welcomeShown = Boolean(this.widgetUI.showAppWelcome?.(welcome));
+    if (welcome.profileNudge) {
+      const shown = welcomeShown || this.widgetUI.showProfileNudge?.(welcome.profileNudge, userKey);
+      try {
+        const snoozed = Number(localStorage.getItem(`hirepool-assistant:profile-nudge:${userKey}:snoozed-until`) || 0) > Date.now();
+        profilePopup = Boolean(shown) && !snoozed && sessionStorage.getItem(profilePopupKey) !== "1";
+      } catch {
+        profilePopup = false; // storage blocked: never pop up repeatedly
+      }
+    }
+    if (this.config.behavior?.firstVisitOpen && session.identity?.id) {
+      try {
+        firstVisit = localStorage.getItem(firstVisitKey) !== "1";
+      } catch {
+        firstVisit = false;
+      }
+    }
+    if (firstVisit || profilePopup) {
+      const autoOpen = this.config.behavior?.autoOpen || {};
+      this.widgetUI.scheduleAutoOpen?.(
+        {
+          delayMs: autoOpen.delayMs || 30000,
+          mobile: autoOpen.mobile || "bubble",
+          teaser: autoOpen.teaser || "Hi! 👋 Need help with your dashboard?",
+          snoozeHours: autoOpen.snoozeHours ?? 24,
+        },
+        {
+          isBlocked: () => this._isQuietPage(),
+          onOpen: (how) => {
+            try {
+              if (firstVisit) localStorage.setItem(firstVisitKey, "1");
+              if (profilePopup) sessionStorage.setItem(profilePopupKey, "1");
+            } catch {}
+            this.events.emit("dashboard-popup:opened", {
+              how,
+              role: welcome.role || null,
+              reason: profilePopup ? "profile-incomplete" : "first-visit",
+              missing: welcome.profileNudge?.missing || [],
+            });
+          },
+        },
+      );
+    }
+    this.events.emit("welcome", { role: welcome.role || null });
+  }
+
+  /**
+   * After a profile update is saved, move straight on to the next missing field
+   * (or celebrate a complete profile).
+   */
+  async _continueProfileCompletion() {
+    const loaded = await this._fetchHirePoolAppWelcome().catch(() => null);
+    if (!loaded || !this.widgetUI) return;
+    // Keep the welcome's progress card in step with the saved profile.
+    this.widgetUI.updateProfileProgress?.(loaded.welcome.profileProgress || null);
+    if (loaded.welcome.profileNudge) {
+      // A short line, not the full reminder card again after every save.
+      const left = Array.isArray(loaded.welcome.profileNudge.missing) ? loaded.welcome.profileNudge.missing.length : 0;
+      if (left > 0) {
+        this.widgetUI.postAssistantNote?.(
+          `${left} profile detail${left === 1 ? "" : "s"} still missing. Say **complete my profile** to fill them in a quick form.`,
+        );
+      }
+    } else if (this._profileWasIncomplete) {
+      this.widgetUI.postAssistantNote?.("🎉 Your profile is now complete. Nice work! Ask me anything else whenever you like.");
+    }
+    this._profileWasIncomplete = Boolean(loaded.welcome.profileNudge);
+  }
+
+  /** In-app bot: call after the HirePool app refreshes its access token. */
+  refreshHirePoolAppSession() {
+    this._hirePoolAppSession?.invalidate();
+  }
+
+  /**
+   * In-app bot: call when the user logs out of the HirePool app. Revokes the
+   * assistant credential, clears this tab's conversation, and removes the widget.
+   */
+  async endHirePoolAppSession() {
+    const appSession = this._hirePoolAppSession;
+    if (!appSession) return;
+    this._hirePoolAppSession = null;
+    try {
+      this.widgetUI?.clearLocalConversation?.();
+    } catch {}
+    await appSession.end();
+    if (this.initialized) this.destroy();
   }
 
   clearConversationLocal() {
@@ -905,6 +1234,10 @@ class AssistantSDK {
       this._hirePoolBridge.destroy();
       this._hirePoolBridge = null;
     }
+    // Unmounting (e.g. leaving the app layout) does not revoke the credential;
+    // endHirePoolAppSession() does that on logout.
+    this._hirePoolAppSession = null;
+    this._explicitPresentation = null;
     this.initialized = false;
   }
 
@@ -914,11 +1247,14 @@ class AssistantSDK {
         "[AssistantSDK] SDK is not initialized. Please call AssistantSDK.init() first.",
       );
     }
+    const allowedHere = this._hirePoolAppSession
+      ? isHirePoolAppUrl(window.location.href)
+      : isHirePoolPublicSiteUrl(window.location.href);
     if (
       this.config?.assistantId === "hirepool" &&
       typeof window !== "undefined" &&
       !this._isDemoPage() &&
-      !isHirePoolPublicSiteUrl(window.location.href)
+      !allowedHere
     ) {
       throw new Error("The HirePool assistant is unavailable on this page");
     }

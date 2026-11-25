@@ -3,11 +3,22 @@ import net from 'node:net';
 import { ActionRegistry } from '../actions/registry.js';
 import { getAllowedApiHosts, getDynamicApiLimits, requestJson, requestText, validateApiUrl } from './secure-http.js';
 import { parseOpenApiSpec } from './openapi.js';
+import { getStateStore, markStateTouched, registerStateFlushHandler } from '../state/state-store.js';
 
 const integrations = new Map();
 const pendingConfirmations = new Map();
 const confirmationOutcomes = new Map();
 const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
+const CONFIRMATION_NAMESPACE = 'confirmation';
+const CONFIRMATION_OUTCOME_NAMESPACE = 'confirmation-outcome';
+const CONFIRMATION_DELETED = 'confirmation-deleted';
+
+registerStateFlushHandler(async scope => {
+  const deleted = scope.get(CONFIRMATION_DELETED);
+  if (!deleted?.size) return;
+  const store = getStateStore();
+  await Promise.all([...deleted].map(digest => store.delete(CONFIRMATION_NAMESPACE, digest)));
+});
 const forbiddenHeaders = new Set([
   'connection', 'content-length', 'cookie', 'host', 'origin', 'proxy-authorization',
   'referer', 'set-cookie', 'transfer-encoding'
@@ -57,6 +68,7 @@ export function registerDynamicApiIntegration(configuration) {
     prepareAction,
     getAuthHeaders,
     getSpecAuthHeaders,
+    getFallbackSpecText,
     permissions = {},
     roleOperationIds = {},
     allowLocalDevelopment = false,
@@ -81,6 +93,9 @@ export function registerDynamicApiIntegration(configuration) {
   }
   if (getSpecAuthHeaders !== undefined && typeof getSpecAuthHeaders !== 'function') {
     throw new Error('getSpecAuthHeaders must be a function');
+  }
+  if (getFallbackSpecText !== undefined && typeof getFallbackSpecText !== 'function') {
+    throw new Error('getFallbackSpecText must be a server-side function');
   }
   if (typeof enabled !== 'boolean' || typeof authenticationRequired !== 'boolean') {
     throw new Error('Dynamic API enabled and authenticationRequired settings must be boolean');
@@ -210,7 +225,8 @@ export function registerDynamicApiIntegration(configuration) {
     authorize,
     prepareAction,
     getAuthHeaders,
-    getSpecAuthHeaders
+    getSpecAuthHeaders,
+    getFallbackSpecText
   });
   integrations.set(id, integration);
   return { id: integration.id, assistantId: integration.assistantId, applicationId: integration.applicationId };
@@ -615,6 +631,22 @@ export async function stageDynamicApiConfirmation(
     expiresAt: Date.now() + CONFIRMATION_TTL_MS,
     state: 'pending'
   });
+  const store = getStateStore();
+  if (store.shared) {
+    const staged = pendingConfirmations.get(digest);
+    await store.setJson(CONFIRMATION_NAMESPACE, digest, {
+      operationId: metadata.operationId,
+      integrationId: metadata.integrationId,
+      argumentsValue: staged.argumentsValue,
+      userId: staged.userId,
+      integrationSessionId: staged.integrationSessionId,
+      conversationId: staged.conversationId,
+      outcomeKey: staged.outcomeKey,
+      reviewMessage: staged.reviewMessage,
+      formattedReview: staged.formattedReview,
+      expiresAt: staged.expiresAt
+    }, CONFIRMATION_TTL_MS);
+  }
   return {
     ready: true,
     confirmationToken: token,
@@ -644,7 +676,32 @@ export function cancelDynamicApiConfirmationWithContext(token, user) {
   };
   confirmation.state = 'cancelled';
   pendingConfirmations.delete(digest);
+  markStateTouched(CONFIRMATION_DELETED, digest);
   return context;
+}
+
+/**
+ * Load a confirmation staged by another server instance (Redis only). The
+ * stored record holds plain data; the action definition is rebuilt from the
+ * user's own authorized tools by operation ID.
+ * @param {string} token
+ * @param {(operationId: string) => Promise<object|null>} resolveActionDefinition
+ */
+export async function hydrateDynamicApiConfirmation(token, resolveActionDefinition) {
+  const store = getStateStore();
+  if (!store.shared || typeof token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(token)) return null;
+  const digest = createHash('sha256').update(token).digest('hex');
+  const inMemory = pendingConfirmations.get(digest);
+  if (inMemory) return { conversationId: inMemory.conversationId || null };
+  const record = await store.getJson(CONFIRMATION_NAMESPACE, digest);
+  if (!record || !(record.expiresAt > Date.now()) || typeof record.operationId !== 'string') return null;
+  const actionDefinition = await resolveActionDefinition(record.operationId);
+  const metadata = actionDefinition?.metadata?.dynamicApi;
+  if (!metadata || metadata.operationId !== record.operationId || metadata.integrationId !== record.integrationId) {
+    return null;
+  }
+  pendingConfirmations.set(digest, { ...record, actionDefinition, state: 'pending' });
+  return { conversationId: record.conversationId || null };
 }
 
 export function cancelDynamicApiConfirmation(token, user) {
@@ -706,6 +763,32 @@ export async function executeApprovedDynamicApiConfirmation(token, user, execute
     throw new Error('A previous submission may have reached HirePool. Check application history before trying again.');
   }
 
+  // Shared state: claim the write across all server instances so a confirmation
+  // can never be submitted twice, even if two instances receive it at once.
+  const store = getStateStore();
+  if (store.shared) {
+    const claimed = await store.setJsonIfAbsent(
+      CONFIRMATION_OUTCOME_NAMESPACE,
+      confirmation.outcomeKey,
+      { state: 'executing' },
+      CONFIRMATION_TTL_MS
+    );
+    if (!claimed) {
+      const shared = await store.getJson(CONFIRMATION_OUTCOME_NAMESPACE, confirmation.outcomeKey);
+      if (shared?.state === 'completed') {
+        confirmation.state = 'completed';
+        confirmation.result = shared.result;
+        return notifySuccess(shared.result);
+      }
+      if (shared?.state === 'uncertain') {
+        throw new Error('A previous submission may have reached HirePool. Check application history before trying again.');
+      }
+      throw new Error('This request is already being submitted. Please wait a moment and check again.');
+    }
+    // Single use: no other instance may start it from the stored confirmation.
+    await store.delete(CONFIRMATION_NAMESPACE, digest);
+  }
+
   const outcome = {
     state: 'executing',
     expiresAt: Date.now() + CONFIRMATION_TTL_MS
@@ -714,20 +797,31 @@ export async function executeApprovedDynamicApiConfirmation(token, user, execute
   confirmation.state = 'executing';
   confirmation.promise = Promise.resolve()
     .then(() => execute(confirmation.actionDefinition, confirmation.argumentsValue))
-    .then(result => {
+    .then(async result => {
       outcome.state = 'completed';
       outcome.result = result;
       confirmation.state = 'completed';
       confirmation.result = result;
+      if (store.shared) {
+        await store.setJson(CONFIRMATION_OUTCOME_NAMESPACE, confirmation.outcomeKey, { state: 'completed', result }, CONFIRMATION_TTL_MS)
+          .catch(error => console.error('[Dynamic API] Could not record the write outcome:', error?.message || error));
+      }
       return notifySuccess(result);
     })
-    .catch(error => {
+    .catch(async error => {
       confirmation.state = 'failed';
       confirmation.error = error;
-      if (Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 500) {
+      const rejectedByHirePool = Number.isInteger(error?.statusCode) && error.statusCode >= 400 && error.statusCode < 500;
+      if (rejectedByHirePool) {
         confirmationOutcomes.delete(confirmation.outcomeKey);
       } else {
         outcome.state = 'uncertain';
+      }
+      if (store.shared) {
+        await (rejectedByHirePool
+          ? store.delete(CONFIRMATION_OUTCOME_NAMESPACE, confirmation.outcomeKey)
+          : store.setJson(CONFIRMATION_OUTCOME_NAMESPACE, confirmation.outcomeKey, { state: 'uncertain' }, CONFIRMATION_TTL_MS)
+        ).catch(stateError => console.error('[Dynamic API] Could not record the write outcome:', stateError?.message || stateError));
       }
       throw error;
     });
@@ -760,6 +854,20 @@ export async function executeDynamicApiRead(actionDefinition, argumentsValue, us
 
 const specCache = new Map();
 const SPEC_CACHE_TTL_MS = 5 * 60 * 1000;
+const fallbackSpecCache = new Map();
+
+function loadFallbackSpecification(integration) {
+  if (typeof integration.getFallbackSpecText !== 'function') return null;
+  if (fallbackSpecCache.has(integration.id)) return fallbackSpecCache.get(integration.id);
+  try {
+    const specification = parseOpenApiSpec(integration.getFallbackSpecText());
+    fallbackSpecCache.set(integration.id, specification);
+    return specification;
+  } catch (error) {
+    console.warn(`[Dynamic API] Bundled specification for '${integration.id}' could not be parsed: ${error.message}`);
+    return null;
+  }
+}
 
 export function clearDynamicApiSpecCache() {
   specCache.clear();
@@ -822,18 +930,30 @@ export async function createRequestActionRegistry(
   if (cache && cached && (now - cached.timestamp < SPEC_CACHE_TTL_MS)) {
     specification = cached.specification;
   } else {
-    const specificationText = await fetchSpec(specUrl, {
-      allowedHosts,
-      ...urlOptions,
-      headers: specHeaders,
-      timeoutMs,
-      maxBytes: maxSpecBytes,
-      allowYaml: true,
-      signal
-    });
-    specification = parseOpenApiSpec(specificationText);
-    if (cache) {
-      specCache.set(cacheKey, { specification, timestamp: now });
+    try {
+      const specificationText = await fetchSpec(specUrl, {
+        allowedHosts,
+        ...urlOptions,
+        headers: specHeaders,
+        timeoutMs,
+        maxBytes: maxSpecBytes,
+        allowYaml: true,
+        signal
+      });
+      specification = parseOpenApiSpec(specificationText);
+      if (cache) {
+        specCache.set(cacheKey, { specification, timestamp: now });
+      }
+    } catch (error) {
+      // A client disconnect must still abort the turn.
+      if (signal?.aborted) throw error;
+      // Keep chat available when the upstream spec is briefly unreachable:
+      // prefer the last good copy, then the integration's bundled snapshot.
+      specification = cached?.specification || loadFallbackSpecification(integration);
+      if (!specification) throw error;
+      console.warn(
+        `[Dynamic API] Specification for '${integration.id}' unavailable (${error.message}); using ${cached ? 'last cached' : 'bundled fallback'} copy.`
+      );
     }
   }
 

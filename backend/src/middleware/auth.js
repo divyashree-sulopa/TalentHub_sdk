@@ -3,6 +3,7 @@ import {
   createHirePoolPrincipal,
   findHirePoolContextBySdkCredential
 } from '../local-integrations/hirepool-session-store.js';
+import { ASSISTANT_SURFACES, isListedWebsiteOrigin } from '../surface.js';
 
 /**
  * Authentication error with 401 HTTP status code
@@ -368,6 +369,11 @@ export function authenticate(options = {}) {
           scopes: Array.isArray(payload.scopes) ? payload.scopes : (payload.scope ? payload.scope.split(' ') : []),
           rawClaims: payload
         };
+
+        // Website guest tokens (HirePool) work only on the HirePool website.
+        if (payload.surface === ASSISTANT_SURFACES.WEBSITE && !isListedWebsiteOrigin(req)) {
+          throw new AuthorizationError('This guest access only works on the HirePool website.', 'TOKEN_SURFACE_MISMATCH');
+        }
 
         return next();
       }

@@ -19,6 +19,67 @@ export const AssistantConfigSchema = z.object({
     'Write a concise email response'
   ]),
   systemInstruction: z.string().max(4000).optional(),
+  surface: z.enum(['website', 'app', 'legacy']).optional(),
+  behavior: z.object({
+    autoOpen: z.object({
+      enabled: z.boolean().default(false),
+      delayMs: z.number().int().min(1000).max(60000).optional(),
+      mobile: z.enum(['bubble', 'panel', 'none']).optional(),
+      teaser: z.string().max(160).optional(),
+      snoozeHours: z.number().int().min(0).max(24 * 30).optional(),
+      excludedPaths: z.array(z.string().max(200)).max(50).optional()
+    }).optional(),
+    signupEnabled: z.boolean().optional(),
+    firstVisitOpen: z.boolean().optional(),
+    loginMode: z.enum(['redirect', 'popup', 'none']).optional(),
+    appLoginUrl: z.string().url().max(500).optional(),
+    welcome: z.object({
+      message: z.string().min(1).max(1500),
+      quickReplies: z.array(z.string().min(1).max(80)).max(5).optional(),
+      // Website: large tappable role cards under the welcome.
+      roleCards: z.array(z.object({
+        icon: z.enum(['briefcase', 'building', 'users']),
+        title: z.string().min(1).max(60),
+        subtitle: z.string().max(80).optional(),
+        prompt: z.string().min(1).max(120)
+      })).max(4).optional()
+    }).optional(),
+    idleNudge: z.object({
+      enabled: z.boolean().default(false),
+      delayMs: z.number().int().min(3000).max(120000).optional(),
+      maxConsecutive: z.number().int().min(0).max(5).optional(),
+      afterWelcome: z.array(z.object({
+        text: z.string().min(1).max(500),
+        quickReplies: z.array(z.string().min(1).max(80)).max(5).optional()
+      })).max(10).optional(),
+      afterQuestion: z.array(z.object({
+        text: z.string().min(1).max(500),
+        quickReplies: z.array(z.string().min(1).max(80)).max(5).optional()
+      })).max(10).optional(),
+      afterAnswer: z.array(z.object({
+        text: z.string().min(1).max(500),
+        quickReplies: z.array(z.string().min(1).max(80)).max(5).optional()
+      })).max(10).optional(),
+      // Dashboard: follow-ups chosen by the signed-in user's role.
+      byRole: z.record(
+        z.enum(['candidate', 'client', 'consultancy']),
+        z.object({
+          afterWelcome: z.array(z.object({
+            text: z.string().min(1).max(500),
+            quickReplies: z.array(z.string().min(1).max(80)).max(5).optional()
+          })).max(10).optional(),
+          afterQuestion: z.array(z.object({
+            text: z.string().min(1).max(500),
+            quickReplies: z.array(z.string().min(1).max(80)).max(5).optional()
+          })).max(10).optional(),
+          afterAnswer: z.array(z.object({
+            text: z.string().min(1).max(500),
+            quickReplies: z.array(z.string().min(1).max(80)).max(5).optional()
+          })).max(10).optional()
+        })
+      ).optional()
+    }).optional()
+  }).optional(),
   features: z.object({
     streaming: z.boolean().default(true),
     summarization: z.boolean().default(true),

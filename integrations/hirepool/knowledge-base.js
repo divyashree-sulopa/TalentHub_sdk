@@ -6,15 +6,30 @@
  * Features (`/features`), and verified backend API capabilities.
  */
 
+/**
+ * Website links the assistant may show. Local-only for now: they point at the
+ * local HirePool website unless HIREPOOL_PUBLIC_SITE_URL is set (e.g. when the
+ * production site is approved for use).
+ */
+function resolvePublicSiteBase(env = process.env) {
+  try {
+    const url = new URL(env.HIREPOOL_PUBLIC_SITE_URL || 'http://localhost:3000');
+    if (['http:', 'https:'].includes(url.protocol) && !url.username && !url.password) return url.origin;
+  } catch {}
+  return 'http://localhost:3000';
+}
+
+const PUBLIC_SITE_BASE = resolvePublicSiteBase();
+
 export const HIREPOOL_PUBLIC_URLS = Object.freeze({
-  home: 'https://hirepool.ai',
-  features: 'https://hirepool.ai/features',
-  pricing: 'https://hirepool.ai/pricing',
-  enterprise: 'https://hirepool.ai/enterprise',
-  partners: 'https://hirepool.ai/partners',
-  privacy: 'https://hirepool.ai/privacy',
-  terms: 'https://hirepool.ai/terms',
-  contact: 'https://hirepool.ai/contact',
+  home: PUBLIC_SITE_BASE,
+  features: `${PUBLIC_SITE_BASE}/features`,
+  pricing: `${PUBLIC_SITE_BASE}/pricing`,
+  enterprise: `${PUBLIC_SITE_BASE}/enterprise`,
+  partners: `${PUBLIC_SITE_BASE}/partners`,
+  privacy: `${PUBLIC_SITE_BASE}/privacy`,
+  terms: `${PUBLIC_SITE_BASE}/terms`,
+  contact: `${PUBLIC_SITE_BASE}/contact`,
   email: 'hi@hirepool.ai'
 });
 
@@ -32,10 +47,17 @@ export const HIREPOOL_PUBLIC_TOPICS = Object.freeze({
 });
 
 /**
+ * Fixed reply for pricing questions. Pricing is not finalised and differs for
+ * individuals, so the assistant never quotes plans or prices.
+ */
+export const HIREPOOL_PRICING_REDIRECT_RESPONSE =
+  `Great question! HirePool's plans depend on how you'll use the platform, so our team shares pricing directly rather than through this chat. Reach out at ${HIREPOOL_PUBLIC_URLS.email} or ${HIREPOOL_PUBLIC_URLS.contact} and they'll recommend the right option for you.\n\nIn the meantime, I'm happy to explain how HirePool works or help you sign up.`;
+
+/**
  * Concise, verified system-prompt knowledge block injected for all HirePool turns.
  */
 export const HIREPOOL_GROUNDED_KNOWLEDGE_PROMPT = `[VERIFIED HIREPOOL PLATFORM CAPABILITIES]
-- Official site & contact: ${HIREPOOL_PUBLIC_URLS.home} | Features: ${HIREPOOL_PUBLIC_URLS.features} | Pricing: ${HIREPOOL_PUBLIC_URLS.pricing} | Privacy Policy: ${HIREPOOL_PUBLIC_URLS.privacy} | Terms of Service: ${HIREPOOL_PUBLIC_URLS.terms} | Contact email: ${HIREPOOL_PUBLIC_URLS.email}.
+- Official site & contact: ${HIREPOOL_PUBLIC_URLS.home} | Features: ${HIREPOOL_PUBLIC_URLS.features} | Contact: ${HIREPOOL_PUBLIC_URLS.contact} | Privacy Policy: ${HIREPOOL_PUBLIC_URLS.privacy} | Terms of Service: ${HIREPOOL_PUBLIC_URLS.terms} | Contact email: ${HIREPOOL_PUBLIC_URLS.email}.
 - Accounts & Roles: HirePool supports three account types — Candidates (job seekers), Companies / Employers (hiring & posting jobs), and Consultancies / Agencies (staffing partners managing bench candidates & placements).
 - Freshers & Experience Levels: Supported. Candidate profiles support 0+ years of experience (0–50), and jobs span entry-level (suitable for freshers and recent graduates where employers post entry roles), mid, senior, lead, and executive roles.
 - Work Modes & Job Types: Job search supports filtering by remote, hybrid, and onsite work modes, as well as full-time, contract, and contract-to-hire employment types, skills, locations, experience level, and salary range.
@@ -43,11 +65,9 @@ export const HIREPOOL_GROUNDED_KNOWLEDGE_PROMPT = `[VERIFIED HIREPOOL PLATFORM C
 - Applying to Multiple Jobs: Candidates can apply to multiple different active openings using one profile; duplicate applications to the same job are prevented.
 - Profile Completion: Completed right after email verification during signup or updated anytime once signed in (e.g., name/company/agency, location, title/industry, experience, and skills).
 
-[VERIFIED HIREPOOL PRICING & PLANS (${HIREPOOL_PUBLIC_URLS.pricing})]
-- Candidates (For Job Seekers): Free forever — includes unlimited job applications, AI-powered job matching, AI video interviews, real-time application tracking, resume parsing & optimization, and push notifications.
-- Companies (For Employers): Custom / "Contact Us" plans based on active jobs and users, starting with a 14-day free trial with full feature access (no credit card required). Includes unlimited job postings, AI candidate screening, video interviews & assessments, analytics dashboard, team collaboration, ATS integrations, and priority support.
-- Consultancies (For Staffing Agencies): Custom / "Contact Us" plans covering bulk candidate management, multi-client dashboard, automated matching, placement tracking, revenue analytics, white-label options, and a dedicated account manager.
-- Enterprise, Cancellation & Payment: Custom enterprise plans are available via sales (${HIREPOOL_PUBLIC_URLS.email} / ${HIREPOOL_PUBLIC_URLS.pricing}). Paid subscriptions can be cancelled anytime with no cancellation fees (active until the end of the billing period). Accepted payments: major credit cards, bank transfers, and purchase orders for enterprise customers.
+[PRICING POLICY]
+- HirePool pricing and subscription plans are not shared through this assistant. Do NOT quote prices, plan names, free tiers or free-of-charge claims, trial periods, discounts, billing, payment methods, or cancellation terms, and never guess them.
+- For any pricing, plan, cost, trial, or billing question, say the HirePool team will share the right option and point the user to ${HIREPOOL_PUBLIC_URLS.contact} or ${HIREPOOL_PUBLIC_URLS.email}.
 
 [VERIFIED HIREPOOL PRIVACY POLICY (${HIREPOOL_PUBLIC_URLS.privacy}, Updated March 2026)]
 - Personal info collected: Contact info (name, email, phone), professional details (resume, work history, skills, education), credentials, company details, AI interview video recordings, and assessment responses/results.
@@ -61,7 +81,8 @@ export const HIREPOOL_GROUNDED_KNOWLEDGE_PROMPT = `[VERIFIED HIREPOOL PLATFORM C
 - Subscriptions & Legal: Paid plans auto-renew unless cancelled prior to renewal. Users can delete their account via settings. Provided "as is" / "as available" without guaranteed employment or hiring outcomes; governed by the laws of Singapore with disputes resolved via good-faith negotiation or binding arbitration in Singapore. Legal inquiries: ${HIREPOOL_PUBLIC_URLS.email}.
 
 [GROUNDING & BOUNDARY RULES]
-- Pricing, subscriptions, free trials, Privacy Policy, Terms of Service, freshers/entry-level support, experienced roles, remote/hybrid/onsite jobs, AI matching, and role capabilities are ALL IN-SCOPE HirePool questions — answer them directly and accurately using ONLY the verified facts above.
+- Privacy Policy, Terms of Service, freshers/entry-level support, experienced roles, remote/hybrid/onsite jobs, AI matching, and role capabilities are ALL IN-SCOPE HirePool questions — answer them directly and accurately using ONLY the verified facts above.
+- Pricing questions are in scope but must follow the PRICING POLICY above.
 - NEVER emit fake credentials, private account data, or unverified live job listings when unauthenticated.`;
 
 /**
@@ -83,7 +104,7 @@ export function detectHirePoolPublicTopic(message) {
     return HIREPOOL_PUBLIC_TOPICS.TERMS;
   }
 
-  if (/\b(?:pricing|prices?|cost|plans?|subscriptions?|billing|free\s+trial|payment\s+methods?|cancel\s+(?:my\s+)?subscription|is\s+(?:hirepool|it|this(?:\s+platform)?)\s+free)\b/i.test(text)) {
+  if (/\b(?:pricing|prices?|priced|how\s+much|costs?|charges?|fees?|subscriptions?|billing|free\s+trial|trial\s+period|payment\s+methods?|(?:paid|premium|pricing|subscription|enterprise|business|monthly|annual|yearly)\s+plans?|plans?\s+(?:and|&)\s+pricing|cancel\s+(?:my\s+)?subscription|is\s+(?:hirepool|it|this(?:\s+platform)?)\s+free|(?:hirepool|your)\s+plans?)\b/i.test(text)) {
     return HIREPOOL_PUBLIC_TOPICS.PRICING;
   }
 
@@ -120,6 +141,23 @@ export function detectHirePoolPublicTopic(message) {
 }
 
 /**
+ * True when the visitor is asking about HirePool's pricing. Instructions that
+ * set the user's own values (for example "Set commission structure to 15% flat
+ * fee" while editing an agency profile) are not pricing questions.
+ *
+ * @param {string} message
+ * @returns {boolean}
+ */
+export function isHirePoolPricingQuestion(message) {
+  const text = String(message || '').trim();
+  if (detectHirePoolPublicTopic(text) !== HIREPOOL_PUBLIC_TOPICS.PRICING) return false;
+  if (/^\s*(?:please\s+)?(?:set|update|change|add|edit|make|use|put|remove|enter|save|record|replace|my)\b/i.test(text)) {
+    return false;
+  }
+  return true;
+}
+
+/**
  * Return a verified, concise Markdown response for an in-scope HirePool FAQ topic
  * if a language model erroneously refuses an in-scope informational question.
  *
@@ -129,15 +167,7 @@ export function detectHirePoolPublicTopic(message) {
 export function getHirePoolGroundedFaqResponse(topic) {
   switch (topic) {
     case HIREPOOL_PUBLIC_TOPICS.PRICING:
-      return [
-        '## HirePool Pricing & Plans',
-        '- **Candidates (Job Seekers):** **Free forever** — includes unlimited job applications, AI-powered job matching, AI video interviews, real-time application tracking, resume parsing & optimization, and push notifications.',
-        '- **Companies (Employers):** Custom **Contact Us** plans based on hiring needs, active job postings, and users — starting with a **14-day free trial** with full access and no credit card required.',
-        '- **Consultancies (Staffing Agencies):** Custom **Contact Us** plans including bulk candidate management, multi-client dashboard, automated matching, placement tracking, revenue analytics, white-label options, and a dedicated account manager.',
-        '- **Enterprise, Billing & Cancellation:** Custom enterprise plans are available, subscriptions can be cancelled anytime with no cancellation fees (active through the end of the billing period), and payments support major credit cards, bank transfers, and purchase orders for enterprise customers.',
-        '',
-        `See full pricing details at ${HIREPOOL_PUBLIC_URLS.pricing} or contact ${HIREPOOL_PUBLIC_URLS.email}.`
-      ].join('\n');
+      return HIREPOOL_PRICING_REDIRECT_RESPONSE;
 
     case HIREPOOL_PUBLIC_TOPICS.PRIVACY:
       return [
@@ -184,7 +214,7 @@ export function getHirePoolGroundedFaqResponse(topic) {
       ].join('\n');
 
     case HIREPOOL_PUBLIC_TOPICS.PLATFORM:
-      return `**HirePool** (${HIREPOOL_PUBLIC_URLS.home}) is an AI-powered talent acquisition platform connecting **Candidates** (free forever), **Companies / Employers**, and **Consultancies / Staffing Agencies** with smart job matching, AI video interviews, screening assessments, resume parsing, and real-time application tracking.`;
+      return `**HirePool** (${HIREPOOL_PUBLIC_URLS.home}) is an AI-powered talent acquisition platform connecting **Candidates**, **Companies / Employers**, and **Consultancies / Staffing Agencies** with smart job matching, AI video interviews, screening assessments, resume parsing, and real-time application tracking.`;
 
     default:
       return null;

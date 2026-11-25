@@ -26,6 +26,24 @@ export const HIREPOOL_LOCAL_DASHBOARD_ORIGINS = Object.freeze([
   'http://127.0.0.1:5173'
 ]);
 
+/** The logged-in HirePool app, where the in-app bot runs. */
+export const HIREPOOL_APP_ORIGIN = 'https://app.hirepool.ai';
+const appOrigins = new Set([HIREPOOL_APP_ORIGIN, ...HIREPOOL_LOCAL_DASHBOARD_ORIGINS]);
+
+/**
+ * True when the page is the logged-in HirePool app. The SDK only uses this to
+ * decide where it may mount; the backend separately enforces the surface from
+ * the request Origin.
+ */
+export function isHirePoolAppUrl(value) {
+  try {
+    const url = new URL(value);
+    return appOrigins.has(url.origin) && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
 const localOrigins = new Set(HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS);
 const publicOrigins = new Set([...HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS, HIREPOOL_PUBLIC_SITE_ORIGIN]);
 const publicPaths = new Set(HIREPOOL_LOCAL_PUBLIC_SITE_PATHS);

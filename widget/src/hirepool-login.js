@@ -26,8 +26,10 @@ export function getHirePoolAccountUrl(currentUrl, action = HIREPOOL_LOGIN_ACTION
     throw new TypeError('Unsupported HirePool account action');
   }
   const route = isSignup ? '/register' : '/login';
+  // Local-only for now: sign-up and login always open the local HirePool app,
+  // for candidates, companies, and agencies alike.
   if (pageUrl.origin === HIREPOOL_PUBLIC_SITE_ORIGIN) {
-    return new URL(route, HIREPOOL_PRODUCTION_LOGIN_URL).href;
+    return new URL(route, HIREPOOL_LOCAL_LOGIN_URL).href;
   }
   const accountUrl = new URL(route, HIREPOOL_LOCAL_LOGIN_URL);
   accountUrl.searchParams.set('assistant_origin', pageUrl.origin);

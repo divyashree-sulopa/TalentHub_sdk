@@ -2,6 +2,10 @@ import { Router } from 'express';
 import { randomUUID } from 'node:crypto';
 import { signJwt } from '../middleware/auth.js';
 import { ASSISTANT_PRESETS } from '../../../config/assistant-presets.js';
+import { ASSISTANT_SURFACES, isListedWebsiteOrigin } from '../surface.js';
+
+/** Website visitors may use the HirePool assistant as guests (public help, jobs, signup). */
+const WEBSITE_GUEST_ASSISTANT_IDS = new Set(['hirepool']);
 
 export const authRouter = Router();
 
@@ -30,6 +34,25 @@ function handleDemoToken(req, res, next) {
     }
 
     const assistantId = req.body?.assistantId || req.query?.assistantId || 'default';
+
+    // HirePool website: a guest token that only works from the HirePool website
+    // (the server refuses it on dashboards and anywhere else; see auth middleware).
+    if (WEBSITE_GUEST_ASSISTANT_IDS.has(assistantId) && isListedWebsiteOrigin(req)) {
+      const guestId = `guest_${randomUUID()}`;
+      const token = signJwt(
+        {
+          sub: guestId,
+          role: 'guest',
+          scopes: ['chat', 'document:upload', 'session:clear'],
+          assistantId,
+          surface: ASSISTANT_SURFACES.WEBSITE,
+          isGuest: true
+        },
+        jwtSecret,
+        { expiresIn: 3600, issuer: process.env.JWT_ISSUER || 'ai-assistant-plugin' }
+      );
+      return res.status(200).json({ token, tokenType: 'Bearer', expiresIn: 3600, user: { id: guestId, role: 'guest' } });
+    }
 
     // Prevent abuse: demo tokens can ONLY be minted for public demo assistants
     if (!PUBLIC_ASSISTANT_IDS.has(assistantId)) {

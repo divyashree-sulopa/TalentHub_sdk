@@ -5,6 +5,48 @@ import { sessionManager } from '../session-manager.js';
 import { authenticate } from '../middleware/auth.js';
 import { DOCUMENT_PROCESSING_CONSENT_VERSION } from '../../../config/document-upload.js';
 import { createSessionOptions } from '../session-scope.js';
+import { ASSISTANT_SURFACES, resolveAssistantSurface, scopeUserToSurface } from '../surface.js';
+import {
+  DOCUMENT_KINDS,
+  buildDashboardDocumentInsight,
+  buildWebsiteDocumentReply,
+  classifyHirePoolDocument,
+  extractResumeDetails,
+  resumeJobSearchCriteria
+} from '../../../integrations/hirepool/document-insight.js';
+import { searchPublicHirePoolJobs } from '../../../integrations/hirepool/public-jobs.js';
+
+/**
+ * Website bot: what to say about an uploaded document (resume -> matching jobs,
+ * job description / candidate list -> the right account type, otherwise ask for
+ * something relevant). Never throws: falls back to the plain upload response.
+ */
+async function buildWebsiteDocumentInsight(parsed, session, sessionOptions) {
+  const { kind } = classifyHirePoolDocument(parsed.text);
+  let jobResult = null;
+  let jobSearchFailed = false;
+  if (kind === DOCUMENT_KINDS.RESUME) {
+    const criteria = resumeJobSearchCriteria(extractResumeDetails(parsed.text));
+    if (criteria) {
+      try {
+        jobResult = await searchPublicHirePoolJobs(criteria);
+      } catch {
+        jobSearchFailed = true;
+      }
+    }
+  }
+  const reply = buildWebsiteDocumentReply({ kind, filename: parsed.filename, text: parsed.text, jobResult, jobSearchFailed });
+  // Remember the account offer, so a plain "yes" / "Sign me up" starts the right signup.
+  session.hirePoolSignupOffer = reply.signupRole
+    ? { role: reply.signupRole, at: Date.now(), source: kind === DOCUMENT_KINDS.RESUME ? 'jobs' : 'document' }
+    : null;
+  if (reply.signupRole && session.hirePoolVisitor && !session.hirePoolVisitor.selectedRole) {
+    session.hirePoolVisitor.selectedRole = reply.signupRole;
+  }
+  // Keep the reply in the history so follow-up questions have context.
+  sessionManager.addMessage(session.id, 'assistant', reply.text, sessionOptions);
+  return { kind, text: reply.text, quickReplies: reply.quickReplies, signupRole: reply.signupRole };
+}
 
 export const documentsRouter = Router();
 
@@ -77,8 +119,10 @@ documentsRouter.post('/upload', requireDocumentProcessingConsent, handleMulterUp
 
     const conversationId = req.body.conversationId || req.query.conversationId || null;
     const assistantId = req.body.assistantId || req.query.assistantId || 'default';
+    // Multipart bodies are parsed only here, after the shared-state loader ran.
+    if (typeof conversationId === 'string') await sessionManager.hydrate(conversationId);
 
-    const sessionOptions = createSessionOptions(req.user, assistantId);
+    const sessionOptions = createSessionOptions(scopeUserToSurface(req.user, resolveAssistantSurface(req), assistantId), assistantId);
 
     if (req.file) {
       fileBuffer = req.file.buffer;
@@ -133,8 +177,30 @@ documentsRouter.post('/upload', requireDocumentProcessingConsent, handleMulterUp
       consentAcceptedAt: Date.now()
     }, sessionOptions);
 
+    let insight = null;
+    const surface = assistantId === 'hirepool' ? resolveAssistantSurface(req) : null;
+    // Dashboard: role-specific next steps (resume -> profile/jobs, JD -> job, resumes -> bench).
+    if (surface === ASSISTANT_SURFACES.APP && ['candidate', 'client', 'consultancy'].includes(req.user?.role) &&
+        typeof req.user?.integrationSessionId === 'string') {
+      try {
+        insight = buildDashboardDocumentInsight({ role: req.user.role, filename: parsed.filename, text: parsed.text });
+        if (insight?.text) sessionManager.addMessage(session.id, 'assistant', insight.text, sessionOptions);
+      } catch {
+        insight = null;
+      }
+    }
+    if (surface === ASSISTANT_SURFACES.WEBSITE) {
+      try {
+        insight = await buildWebsiteDocumentInsight(parsed, session, sessionOptions);
+      } catch {
+        insight = null;
+      }
+      if (req.aborted || res.destroyed) return;
+    }
+
     res.status(200).json({
       status: 'success',
+      ...(insight ? { insight } : {}),
       conversationId: session.id,
       document: {
         id: attachedDoc.id,
@@ -172,7 +238,7 @@ documentsRouter.get('/:conversationId', (req, res, next) => {
   try {
     const { conversationId } = req.params;
     const assistantId = req.query.assistantId || 'default';
-    const sessionOptions = createSessionOptions(req.user, assistantId);
+    const sessionOptions = createSessionOptions(scopeUserToSurface(req.user, resolveAssistantSurface(req), assistantId), assistantId);
 
     const documents = sessionManager.getDocuments(conversationId, sessionOptions);
     res.json({
@@ -201,7 +267,7 @@ documentsRouter.delete('/:conversationId/:documentId', (req, res, next) => {
   try {
     const { conversationId, documentId } = req.params;
     const assistantId = req.query.assistantId || 'default';
-    const sessionOptions = createSessionOptions(req.user, assistantId);
+    const sessionOptions = createSessionOptions(scopeUserToSurface(req.user, resolveAssistantSurface(req), assistantId), assistantId);
 
     const removed = sessionManager.removeDocument(conversationId, documentId, sessionOptions);
     if (!removed) {
@@ -232,7 +298,7 @@ documentsRouter.delete('/:conversationId', (req, res, next) => {
   try {
     const { conversationId } = req.params;
     const assistantId = req.query.assistantId || 'default';
-    const sessionOptions = createSessionOptions(req.user, assistantId);
+    const sessionOptions = createSessionOptions(scopeUserToSurface(req.user, resolveAssistantSurface(req), assistantId), assistantId);
 
     const cleared = sessionManager.clearDocuments(conversationId, sessionOptions);
     res.json({

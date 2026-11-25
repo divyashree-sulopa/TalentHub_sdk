@@ -54,19 +54,73 @@ export function isHirePoolAgencyCandidateAddIntent(message, session, authUser) {
   return false;
 }
 
+const NAME_STOPWORDS = new Set([
+  'add', 'candidate', 'candidates', 'new', 'bench', 'update', 'edit', 'change', 'create', 'show', 'my', 'the',
+  'please', 'cancel', 'help', 'agency', 'pool', 'details', 'name', 'email', 'register', 'save', 'confirm',
+  'yes', 'no', 'ok', 'okay', 'to', 'a', 'an', 'list', 'view', 'remove', 'delete', 'submit', 'job', 'jobs'
+]);
+
+/**
+ * True for text that can plausibly be a person's name: 1-4 words of letters
+ * (with . ' -), no digits, no @, and no command words like "add candidate".
+ */
+export function isLikelyPersonName(text) {
+  const value = String(text || '').trim().replace(/[,.;]+$/, '');
+  if (!value || value.length > 80 || /[@\d:]/.test(value)) return false;
+  const words = value.split(/\s+/);
+  if (words.length < 1 || words.length > 4) return false;
+  if (!words.every(word => /^[A-Za-z][A-Za-z.'-]*$/.test(word) && word.length <= 30)) return false;
+  return !words.some(word => NAME_STOPWORDS.has(word.toLowerCase()));
+}
+
+function splitName(fullName) {
+  const parts = String(fullName).trim().replace(/[,.;]+$/, '').split(/\s+/).filter(Boolean);
+  const titleCase = w => w.charAt(0).toUpperCase() + w.slice(1);
+  return { first: parts[0] ? titleCase(parts[0]) : '', last: parts.slice(1).map(titleCase).join(' ') };
+}
+
+const LOCATION_KEYWORDS = /\b(bengaluru|bangalore|mumbai|delhi(?:\s+ncr)?|hyderabad|pune|chennai|noida|gurgaon|gurugram|kolkata|ahmedabad|kochi|coimbatore|jaipur|chandigarh|london|new\s+york|san\s+francisco|singapore|berlin|toronto|dubai|remote)\b/i;
+const EXPERIENCE_PATTERN = /\b(\d+(?:\.\d+)?)\s*\+?\s*(?:years?|yrs?)\b/i;
+
+const COUNTRY_AFTER_CITY = /^\s*,?\s*(india|usa|us|united\s+states|uk|united\s+kingdom|uae|canada|germany|singapore|australia)\b/i;
+const FIELD_LABEL_WORDS = String.raw`(?:first[\s_]name|last[\s_]name|full\s+name|(?:current\s+)?location|email(?:\s+address)?|job\s+title|experience|skills?|phone|bench\s+status|notice(?:\s+period)?)`;
+
+/**
+ * Make labelled replies easy to read: "Location (city, country) -bengaluru"
+ * becomes "Location: bengaluru", and each label starts its own segment, so
+ * "Last name - naidu Location - pune" reads as two fields.
+ */
+function normalizeLabelledText(raw) {
+  let text = String(raw || '');
+  // Drop hints in brackets after a label, e.g. "Location (city, country)".
+  text = text.replace(new RegExp(String.raw`\b(${FIELD_LABEL_WORDS})\s*\([^)]*\)`, 'gi'), '$1');
+  // "Label - value" / "Label -value" -> "Label: value"
+  text = text.replace(new RegExp(String.raw`\b(${FIELD_LABEL_WORDS})\s*[-–—]\s*`, 'gi'), '$1: ');
+  // A label in the middle of the line starts a new segment.
+  text = text.replace(new RegExp(String.raw`([^,;\n])\s+(${FIELD_LABEL_WORDS})\s*:`, 'gi'), '$1; $2:');
+  return text;
+}
+
 export function extractCandidateFields(message, currentDraft = {}) {
-  const text = String(message || '').trim();
+  const text = normalizeLabelledText(String(message || '').trim()).trim();
+  const hasLabels = new RegExp(String.raw`\b${FIELD_LABEL_WORDS}\s*[:=]`, 'i').test(text);
   const fields = { ...(currentDraft || {}) };
+  const labeledName = /(?:^|\n|[;,])\s*(?:candidate(?:\s+(?:full\s+)?name)?|(?:full|first|last)?\s*name)\s*[:=]/i.test(text);
   const sep = '(?:[:=]|\\s*[-–—]\\s+|\\s+(?:is|to|as)\\s+|\\s+)';
   const FIELD_BOUNDARY = '(?=(?:[,;]\\s*(?:job[\\s_]title|role|position|specialization|designation|(?:current[\\s_])?location|(?:technical[\\s_])?skills?|(?:years[\\s_]of[\\s_])?experience|exp|phone|mobile|email|bench[\\s_]status|notice(?:[\\s_]period)?)\\b)|$|[;\\n])';
 
   // 1. Full name or First / Last name
   const firstMatch = text.match(new RegExp(`(?:^|\\n|[;,])\\s*first[\\s_]name\\s*${sep}\\s*([^,;\\n]+)`, 'i'));
-  if (firstMatch) fields.first_name = firstMatch[1].trim();
+  if (firstMatch) fields.first_name = firstMatch[1].trim().replace(/\b[a-z]/g, l => l.toUpperCase());
 
   const lastMatch = text.match(new RegExp(`(?:^|\\n|[;,])\\s*last[\\s_]name\\s*${sep}\\s*([^,;\\n]+)`, 'i'));
-  if (lastMatch) fields.last_name = lastMatch[1].trim();
+  if (lastMatch) fields.last_name = lastMatch[1].trim().replace(/\b[a-z]/g, l => l.toUpperCase());
 
+  // A labelled name ("Name: …") is an explicit correction and replaces the old one.
+  if (labeledName && !firstMatch && !lastMatch) {
+    delete fields.first_name;
+    delete fields.last_name;
+  }
   if (!fields.first_name || !fields.last_name) {
     const nameMatch = text.match(new RegExp(`(?:^|\\n|[;,])\\s*(?:candidate(?:\\s+(?:full\\s+)?name)?|(?:full|first)?\\s*name)\\s*${sep}\\s*([^,;\\n]+)`, 'i')) ||
       text.match(/\b(?:add|register)(?:\s+(?:a|this))?\s+(?:new\s+)?candidate(?:\s+to\s+(?:my\s+|our\s+)?(?:bench|agency|pool))?\s*[:\-–—]?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)\b/i);
@@ -96,8 +150,10 @@ export function extractCandidateFields(message, currentDraft = {}) {
   if (titleMatch) {
     fields.job_title = titleMatch[1].trim();
   } else if (!fields.job_title) {
-    const roleMatch = text.match(/\b(software engineer|frontend developer|backend developer|full[\s-]?stack developer|data scientist|data engineer|devops engineer|product manager|ui[\s/]?ux designer|qa engineer|systems? engineer|cloud engineer|solutions? architect)\b/i) ||
-      text.match(/\b([A-Za-z\s]+?\b(?:engineer|developer|designer|architect|consultant|analyst|specialist|manager|lead))\b/i);
+    // Guess from the text without the email, so "x@y.com data analyst" can't become "com data analyst".
+    const textForTitle = text.replace(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/g, ' , ');
+    const roleMatch = textForTitle.match(/\b(software engineer|frontend developer|backend developer|full[\s-]?stack developer|data scientist|data engineer|devops engineer|product manager|ui[\s/]?ux designer|qa engineer|systems? engineer|cloud engineer|solutions? architect)\b/i) ||
+      textForTitle.match(/\b((?:[A-Za-z]+[ \t]+){0,2}(?:engineer|developer|designer|architect|consultant|analyst|specialist|manager|lead))\b/i);
     if (roleMatch) {
       fields.job_title = roleMatch[1].trim();
     }
@@ -112,7 +168,13 @@ export function extractCandidateFields(message, currentDraft = {}) {
     const locKeywords = /\b(bengaluru|bangalore|mumbai|delhi(?:\s+ncr)?|hyderabad|pune|chennai|noida|gurgaon|gurugram|kolkata|ahmedabad|london|new\s+york|san\s+francisco|singapore|berlin|toronto|remote)\b/i;
     const locKeywordMatch = text.match(locKeywords);
     if (locKeywordMatch) {
-      fields.current_location = locKeywordMatch[1].trim().replace(/\b\w/g, l => l.toUpperCase());
+      const titleCase = value => value.replace(/\b\w/g, l => l.toUpperCase());
+      const city = titleCase(locKeywordMatch[1].trim());
+      // Keep a country typed after the city: "bengaluru, india" -> "Bengaluru, India".
+      const country = text.slice(locKeywordMatch.index + locKeywordMatch[0].length).match(COUNTRY_AFTER_CITY);
+      fields.current_location = country
+        ? `${city}, ${country[1].length <= 3 ? country[1].toUpperCase() : titleCase(country[1].toLowerCase())}`
+        : city;
     }
   }
 
@@ -139,6 +201,60 @@ export function extractCandidateFields(message, currentDraft = {}) {
   const noticeMatch = text.match(new RegExp(`(?:^|\\n|[;,])\\s*notice(?:\\s+period)?\\s*${sep}\\s*(\\d+)\\s*(?:days?)?`, 'i')) ||
     text.match(/\b(\d+)\s*days?\s+notice\b/i);
   if (noticeMatch) fields.notice_period_days = Number.parseInt(noticeMatch[1], 10);
+
+  // --- Unlabelled one-line details, e.g.
+  // "divya shree divyashree@x.com software engineer bengaluru 1 year javascript, react, git"
+  const emailAt = text.search(/[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}/);
+  if (!labeledName && emailAt > 0) {
+    const beforeEmail = text.slice(0, emailAt).replace(/[,;:\s]+$/, '').trim();
+    if (isLikelyPersonName(beforeEmail)) {
+      const { first, last } = splitName(beforeEmail);
+      fields.first_name = first;
+      if (last) fields.last_name = last;
+      else delete fields.last_name;
+    }
+  }
+
+  if (!expMatch) {
+    const looseExp = text.match(EXPERIENCE_PATTERN);
+    if (looseExp) fields.years_of_experience = Math.round(Number.parseFloat(looseExp[1]));
+  }
+
+  // Guessing skills from loose comma lists only makes sense for unlabelled one-liners.
+  if (!skillsMatch && !hasLabels) {
+    const parts = text.split(/[,;]/).map(p => p.trim()).filter(Boolean);
+    if (parts.length >= 3) {
+      const isOtherField = part => {
+        const lower = part.toLowerCase();
+        return /@/.test(part) ||
+          EXPERIENCE_PATTERN.test(part) ||
+          LOCATION_KEYWORDS.test(part) && part.split(/\s+/).length <= 2 ||
+          (fields.job_title && lower === String(fields.job_title).toLowerCase()) ||
+          (fields.first_name && lower === `${fields.first_name} ${fields.last_name || ''}`.trim().toLowerCase()) ||
+          isLikelyPersonName(part) && part.split(/\s+/).length >= 2 && !/\b(?:js|sql|api|ui|ux)\b/i.test(part);
+      };
+      const skills = [];
+      // The first chunk usually ends with the first skill ("… 1 year javascript").
+      const firstWords = parts[0].split(/\s+/);
+      const lead = firstWords[firstWords.length - 1];
+      if (parts[0].split(/\s+/).length > 1 && lead && !/@/.test(lead) && !EXPERIENCE_PATTERN.test(lead) &&
+          !LOCATION_KEYWORDS.test(lead) && !/^(?:years?|yrs?)$/i.test(lead)) {
+        skills.push(lead);
+      }
+      for (const part of parts.slice(1)) {
+        if (!isOtherField(part) && part.split(/\s+/).length <= 3) skills.push(part.replace(/[.]+$/, ''));
+      }
+      if (skills.length >= 2) fields.skills = [...new Set(skills)];
+    }
+  }
+
+  // A guessed job title must not start with the candidate's own name.
+  if (fields.job_title && (fields.first_name || fields.last_name)) {
+    const nameWords = new Set(`${fields.first_name || ''} ${fields.last_name || ''}`.toLowerCase().split(/\s+/).filter(Boolean));
+    const words = String(fields.job_title).split(/\s+/);
+    while (words.length > 1 && nameWords.has(words[0].toLowerCase())) words.shift();
+    fields.job_title = words.join(' ');
+  }
 
   return fields;
 }
@@ -191,12 +307,23 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
   const pendingPromptField = session?.consultancyCandidateDraft?.pendingField;
   if (pendingPromptField && !updatedFields[pendingPromptField]) {
     if (pendingPromptField === 'first_name' || pendingPromptField === 'last_name') {
-      const parts = text.split(/\s+/);
-      if (parts.length >= 2) {
-        updatedFields.first_name = parts[0];
-        updatedFields.last_name = parts.slice(1).join(' ');
-      } else {
-        updatedFields[pendingPromptField] = text;
+      // Only something that looks like a name is accepted as a name
+      // (never "add candidate" or a whole sentence of other details).
+      // "naidu bengaluru, india": the name is what comes before the city.
+      let nameText = text;
+      if (!isLikelyPersonName(nameText)) {
+        const lead = text.split(/[,;]/)[0];
+        const city = lead.match(LOCATION_KEYWORDS);
+        nameText = (city ? lead.slice(0, city.index) : lead).trim();
+      }
+      if (isLikelyPersonName(nameText)) {
+        const { first, last } = splitName(nameText);
+        if (pendingPromptField === 'last_name' && updatedFields.first_name && !last) {
+          updatedFields.last_name = first;
+        } else {
+          updatedFields.first_name = first;
+          if (last) updatedFields.last_name = last;
+        }
       }
     } else if (pendingPromptField === 'email' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(text)) {
       updatedFields.email = text.toLowerCase();
@@ -205,6 +332,13 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
     } else if (pendingPromptField === 'current_location') {
       updatedFields.current_location = text;
     }
+  }
+
+  // A draft name that isn't a real name (e.g. "add candidate") is dropped and asked again.
+  if ((updatedFields.first_name || updatedFields.last_name) &&
+      !isLikelyPersonName(`${updatedFields.first_name || ''} ${updatedFields.last_name || ''}`.trim())) {
+    delete updatedFields.first_name;
+    delete updatedFields.last_name;
   }
 
   // Check required fields
@@ -271,15 +405,37 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
     };
   }
 
+  // Details changed after a review card was shown: retire the old confirmation.
+  const previousToken = session?.consultancyCandidateDraft?.confirmationToken;
+  if (previousToken && typeof cancelConfirmation === 'function') {
+    try {
+      await cancelConfirmation(previousToken);
+    } catch {}
+  }
+
   // Stage confirmation via stageCandidateAddConfirmation callback if provided
   let staged = null;
   if (typeof stageCandidateAddConfirmation === 'function') {
     try {
       staged = await stageCandidateAddConfirmation({ body: validation.normalized });
-    } catch (err) {
+    } catch {
+      // Keep everything collected so far and ask for a correction in plain words.
+      session.consultancyCandidateDraft = {
+        active: true,
+        stage: 'collecting',
+        fields: updatedFields,
+        pendingField: null,
+        updatedAt: new Date().toISOString()
+      };
       return {
         handled: true,
-        text: `I could not stage the candidate creation: ${err?.message || 'Verification failed.'}`
+        text: [
+          "HirePool couldn't accept these candidate details yet. Please check them and send the corrections in one message, for example:",
+          '',
+          `*Name: ${updatedFields.first_name || 'First'} ${updatedFields.last_name || 'Last'}, Email: ${updatedFields.email || 'name@example.com'}, Job title: ${updatedFields.job_title || 'Software Engineer'}, Location: ${updatedFields.current_location || 'Bengaluru'}, Experience: ${updatedFields.years_of_experience ?? 0} years, Skills: ${(updatedFields.skills || []).join(', ') || 'React, Node.js'}*`,
+          '',
+          'Names should contain letters only, and the email must be a valid address. Nothing has been added to your bench.'
+        ].join('\n')
       };
     }
   }
@@ -317,6 +473,14 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
   };
 
   if (staged?.hostAction) {
+    // The review card lists every detail, so the message stays short (no duplicate list).
+    const n = validation.normalized;
+    response.text = [
+      '### Review Candidate Bench Details',
+      `Almost done! Check **${n.first_name} ${n.last_name}** (${n.job_title}, ${n.current_location}) in the card below.`,
+      '',
+      'Press **Confirm & Execute** to add them to your bench, or reply with any changes, for example *phone 9876543210* or *skills React, Node.js*.'
+    ].join('\n');
     response.hostAction = staged.hostAction;
   } else if (registry) {
     const action = registry.list()?.find(a =>

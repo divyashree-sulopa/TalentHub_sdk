@@ -4,9 +4,24 @@ import {
   executeDynamicApiAction,
   executeApprovedDynamicApiConfirmation,
   cancelDynamicApiConfirmationWithContext,
-  createRequestActionRegistry
+  createRequestActionRegistry,
+  hydrateDynamicApiConfirmation
 } from '../dynamic-api/catalog.js';
 import { ActionRegistry } from '../actions/registry.js';
+import { getAssistantActionRegistry } from '../../../connectors/bridge.js';
+
+/**
+ * Shared state: load a confirmation staged on another server instance, then
+ * the conversation it updates. The action is rebuilt from this user's own
+ * authorized tools, so a stored record can never widen what they may do.
+ */
+async function loadSharedConfirmation(token, user) {
+  const loaded = await hydrateDynamicApiConfirmation(token, async operationId => {
+    const registry = await createRequestActionRegistry('hirepool', user, getAssistantActionRegistry('hirepool'));
+    return registry.list().find(action => action.metadata?.dynamicApi?.operationId === operationId) || null;
+  });
+  if (loaded?.conversationId) await sessionManager.hydrate(loaded.conversationId);
+}
 import {
   getHirePoolApiAccessToken,
   getHirePoolContextBySessionId
@@ -283,7 +298,7 @@ export async function executeAndVerifyConsultancyCandidateAdd(actionDefinition, 
     );
     if (candReadAction) {
       const readParams = candReadAction.metadata?.dynamicApi?.operationId === 'get_candidate_api_v1_consultancies_candidates__candidate_id__get'
-        ? { candidate_id: data.id }
+        ? { path: { candidate_id: data.id } }
         : { query: { query: data.email || data.first_name } };
       verifiedCandidate = await executeDynamicApiAction(candReadAction, readParams, user, { request });
     }
@@ -363,6 +378,13 @@ dynamicApiConfirmationRouter.post('/cancel', authenticate(), async (req, res) =>
       error: { code: 'INVALID_CONFIRMATION', message: 'A valid action confirmation is required.' }
     });
   }
+  try {
+    await loadSharedConfirmation(body.confirmationToken, user);
+  } catch {
+    return res.status(503).json({
+      error: { code: 'STATE_UNAVAILABLE', message: 'The assistant is temporarily unavailable. Please try again shortly.' }
+    });
+  }
   const cancelCtx = cancelDynamicApiConfirmationWithContext(body.confirmationToken, user);
   if (!cancelCtx.cancelled) {
     return res.status(409).json({
@@ -425,6 +447,7 @@ dynamicApiConfirmationRouter.post('/', authenticate(), async (req, res) => {
   }
 
   try {
+    await loadSharedConfirmation(body.confirmationToken, user);
     const result = await executeApprovedDynamicApiConfirmation(
       body.confirmationToken,
       user,
@@ -584,6 +607,18 @@ dynamicApiConfirmationRouter.post('/', authenticate(), async (req, res) => {
             const currentSession = sessionManager.getSession(conversationId, createSessionOptions(user, 'hirepool'));
             if (currentSession) {
               currentSession.consultancyCandidateDraft = null;
+              // Remember who was just added, so "add a phone number to this candidate" works.
+              const added = executionResult?.data || {};
+              const body = argumentsValue?.body || {};
+              const name = `${added.first_name || body.first_name || ''} ${added.last_name || body.last_name || ''}`.trim();
+              if (added.id || body.email) {
+                currentSession.consultancyLastCandidate = {
+                  id: added.id || null,
+                  name: name || null,
+                  email: added.email || body.email || null,
+                  at: Date.now()
+                };
+              }
             }
             return;
           }

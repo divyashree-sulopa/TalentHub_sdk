@@ -637,9 +637,10 @@ test('Priority 2: extractSafeVerificationUrl & isSafeVerificationUrl allow valid
   const validProd = 'https://app.hirepool.ai/auth/verify-email?token=xyz123';
 
   assert.equal(extractSafeVerificationUrl(validLocal), validLocal);
-  assert.equal(extractSafeVerificationUrl(validProd), validProd);
   assert.equal(isSafeVerificationUrl(validLocal), true);
-  assert.equal(isSafeVerificationUrl(validProd), true);
+  // Local-only for now: production verification links are not shown.
+  assert.equal(extractSafeVerificationUrl(validProd), null);
+  assert.equal(isSafeVerificationUrl(validProd), false);
 
   const unsafeUrls = [
     'javascript:alert(1)',
@@ -827,7 +828,7 @@ test('Priority 2: renderVerificationCard & HirePoolSignupCoordinator handle butt
     let verifyClicks = 0;
     const cardWithUrl = renderVerificationCard({
       email: 'user@example.com',
-      verificationUrl: 'https://app.hirepool.ai/auth/verify-email?token=tok123',
+      verificationUrl: 'http://localhost:5173/auth/verify-email?token=tok123',
       onVerifyClick: () => {
         verifyClicks++;
       },
@@ -864,7 +865,7 @@ test('Priority 2: renderVerificationCard & HirePoolSignupCoordinator handle butt
           signupToken: 'tok-dedupe',
           email,
           userType,
-          verificationUrl: 'https://app.hirepool.ai/auth/verify-email?token=tok-dedupe-1'
+          verificationUrl: 'http://localhost:5173/auth/verify-email?token=tok-dedupe-1'
         }),
         checkSignupVerificationStatus: async () => {
           networkCalls++;
@@ -906,6 +907,7 @@ test('Priority 2: renderVerificationCard & HirePoolSignupCoordinator handle butt
 // PRIORITY 3 TESTS: Domain Classification, Visitor Routing & 13-Turn Conversation
 // ============================================================================
 
+const PRICING_TURN_QUESTION = 'Is HirePool free for candidates?';
 const THIRTEEN_TURN_VISITOR_QUESTIONS = [
   'How does HirePool work?',
   'Do you support freshers?',
@@ -1032,6 +1034,12 @@ test('Priority 3: full 13-turn guest conversation retains context, answers via g
     }
 
     assert.equal(res.body.action ?? null, null, `Turn ${i + 1} ("${q}") must NOT emit intrusive signup/login card`);
+    if (q === PRICING_TURN_QUESTION) {
+      // Pricing is never quoted: answered with a fixed contact-sales reply, no model call.
+      assert.match(res.body.text, /hi@hirepool\.ai|hirepool\.ai\/contact/i);
+      assert.doesNotMatch(res.body.text, /free forever|free trial|14-day/i);
+      continue;
+    }
     assert.equal(
       res.body.text.includes("I can't verify a HirePool login"),
       false,
@@ -1047,7 +1055,7 @@ test('Priority 3: full 13-turn guest conversation retains context, answers via g
     }
   }
 
-  assert.equal(providerCalls.length, THIRTEEN_TURN_VISITOR_QUESTIONS.length);
+  assert.equal(providerCalls.length, THIRTEEN_TURN_VISITOR_QUESTIONS.length - 1);
 
   // Turn 14: Explicit signup prompt in SAME session triggers in-chat hirepool_signup cleanly (JSON)
   const signupTurnRes = await request(app)

@@ -435,7 +435,7 @@ test('Comprehensive HirePool Auth Handoff and Session Ownership Suite', async (t
     // 3. Send first authenticated chat message using this credential
     const chatRes = await request(app)
       .post('/api/chat')
-      .set('Origin', 'http://localhost:3000')
+      .set('Origin', 'http://localhost:5173')
       .set('Authorization', `Bearer ${sdkSession.credential}`)
       .send({
         assistantId: 'hirepool',
