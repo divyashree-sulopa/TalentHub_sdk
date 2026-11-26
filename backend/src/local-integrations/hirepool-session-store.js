@@ -4,6 +4,7 @@ import {
   markStateTouched,
   registerStateFlushHandler
 } from '../state/state-store.js';
+import { getHirePoolApiBaseUrl, hirePoolApiTarget } from './hirepool-api-url.js';
 
 const contextsByCredential = new Map();
 const credentialsByAccessToken = new Map();
@@ -236,7 +237,7 @@ export function updateHirePoolSessionTokens(sessionId, newAccessToken, newRefres
  * Refreshes tokens for an active session using HirePool's POST /api/v1/auth/refresh.
  * Mutex-protected against concurrent refreshes.
  */
-export async function refreshHirePoolSessionTokens(sessionId, baseUrl = 'http://127.0.0.1:8000') {
+export async function refreshHirePoolSessionTokens(sessionId, baseUrl = getHirePoolApiBaseUrl().href) {
   const context = getHirePoolContextBySessionId(sessionId);
   if (!context || !context.refreshToken) {
     return null;
@@ -249,14 +250,13 @@ export async function refreshHirePoolSessionTokens(sessionId, baseUrl = 'http://
 
   const refreshPromise = (async () => {
     try {
-      const refreshUrl = new URL('api/v1/auth/refresh', baseUrl);
-      refreshUrl.hostname = '127.0.0.1';
+      const { url: refreshUrl, headers: targetHeaders } = hirePoolApiTarget('api/v1/auth/refresh', { baseUrl });
       const response = await fetch(refreshUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Host: 'localhost:8000'
+          ...targetHeaders
         },
         body: JSON.stringify({ refresh_token: context.refreshToken }),
         signal: AbortSignal.timeout(8000)
@@ -304,7 +304,7 @@ export function revokeHirePoolSessionBySdkCredential(credential) {
  *
  * @param {string} credential
  * @param {object} [options]
- * @param {string} [options.apiBaseUrl='http://127.0.0.1:8000']
+ * @param {string} [options.apiBaseUrl] the HirePool API address (default: from settings)
  * @param {typeof fetch} [options.fetchImpl=fetch]
  * @param {number} [options.timeoutMs=4000]
  * @returns {Promise<{ hadSdkSession: boolean, backendRevoked: boolean, status: number|null, reason: string|null, sessionId: string|null, userId: string|null }>}
@@ -312,7 +312,7 @@ export function revokeHirePoolSessionBySdkCredential(credential) {
 export async function revokeHirePoolSessionWithBackend(
   credential,
   {
-    apiBaseUrl = 'http://127.0.0.1:8000',
+    apiBaseUrl = getHirePoolApiBaseUrl().href,
     fetchImpl = fetch,
     timeoutMs = 4000
   } = {}
@@ -349,15 +349,14 @@ export async function revokeHirePoolSessionWithBackend(
   }
 
   try {
-    const logoutUrl = new URL('api/v1/auth/logout', apiBaseUrl);
-    logoutUrl.hostname = '127.0.0.1';
+    const { url: logoutUrl, headers: targetHeaders } = hirePoolApiTarget('api/v1/auth/logout', { baseUrl: apiBaseUrl });
     const response = await fetchImpl(logoutUrl, {
       method: 'POST',
       headers: {
         Authorization: `Bearer ${accessToken}`,
         'Content-Type': 'application/json',
         Accept: 'application/json',
-        Host: 'localhost:8000'
+        ...targetHeaders
       },
       body: JSON.stringify(refreshToken ? { refresh_token: refreshToken } : {}),
       signal: AbortSignal.timeout(timeoutMs)
@@ -427,7 +426,7 @@ export function getHirePoolApiTokens(user) {
  * Returns a guaranteed valid access token for API operations,
  * automatically refreshing via HirePool's token lifecycle if needed.
  */
-export async function getHirePoolValidAccessToken(user, baseUrl = 'http://127.0.0.1:8000') {
+export async function getHirePoolValidAccessToken(user, baseUrl = getHirePoolApiBaseUrl().href) {
   const context = getHirePoolContextBySessionId(user?.integrationSessionId);
   if (!context) return null;
 

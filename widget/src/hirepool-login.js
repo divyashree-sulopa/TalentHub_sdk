@@ -10,7 +10,16 @@ export const HIREPOOL_SIGNUP_ACTION = 'hirepool_signup';
 
 let activeAccountWindow = null;
 
-export function getHirePoolAccountUrl(currentUrl, action = HIREPOOL_LOGIN_ACTION) {
+/** The app's login address from the server config (HIREPOOL_APP_LOGIN_URL), else the local app. */
+function resolveAppLoginUrl(appLoginUrl) {
+  try {
+    const url = new URL(appLoginUrl);
+    if (url.protocol === 'https:' || url.protocol === 'http:') return url.href;
+  } catch {}
+  return HIREPOOL_LOCAL_LOGIN_URL;
+}
+
+export function getHirePoolAccountUrl(currentUrl, action = HIREPOOL_LOGIN_ACTION, appLoginUrl = null) {
   let pageUrl;
   try {
     pageUrl = new URL(currentUrl);
@@ -26,12 +35,13 @@ export function getHirePoolAccountUrl(currentUrl, action = HIREPOOL_LOGIN_ACTION
     throw new TypeError('Unsupported HirePool account action');
   }
   const route = isSignup ? '/register' : '/login';
-  // Local-only for now: sign-up and login always open the local HirePool app,
+  // Sign-up and login open the configured HirePool app (local app by default),
   // for candidates, companies, and agencies alike.
+  const loginBase = resolveAppLoginUrl(appLoginUrl);
   if (pageUrl.origin === HIREPOOL_PUBLIC_SITE_ORIGIN) {
-    return new URL(route, HIREPOOL_LOCAL_LOGIN_URL).href;
+    return new URL(route, loginBase).href;
   }
-  const accountUrl = new URL(route, HIREPOOL_LOCAL_LOGIN_URL);
+  const accountUrl = new URL(route, loginBase);
   accountUrl.searchParams.set('assistant_origin', pageUrl.origin);
   return accountUrl.href;
 }
@@ -40,12 +50,12 @@ export function getHirePoolLoginUrl(currentUrl) {
   return getHirePoolAccountUrl(currentUrl, HIREPOOL_LOGIN_ACTION);
 }
 
-export function openHirePoolAccount({ currentUrl, openWindow, action = HIREPOOL_LOGIN_ACTION }) {
+export function openHirePoolAccount({ currentUrl, openWindow, action = HIREPOOL_LOGIN_ACTION, appLoginUrl = null }) {
   if (typeof openWindow !== 'function') {
     throw new TypeError('A browser window opener is required');
   }
 
-  const accountUrl = getHirePoolAccountUrl(currentUrl, action);
+  const accountUrl = getHirePoolAccountUrl(currentUrl, action, appLoginUrl);
   let accountWindow;
   try {
     accountWindow = openWindow('about:blank', '_blank');

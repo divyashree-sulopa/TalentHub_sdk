@@ -8,7 +8,7 @@ import { createSessionOptions } from '../session-scope.js';
 import { sessionManager } from '../session-manager.js';
 import { HIREPOOL_LOCAL_INTEGRATION_ID } from '../../../integrations/hirepool/local-development.js';
 
-const MAX_RESUME_BYTES = 5 * 1024 * 1024;
+const MAX_RESUME_BYTES = 4 * 1024 * 1024; // fits Vercel's request size limit
 const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
 const PROFILE_READ_OPERATION = 'get_my_profile_api_v1_candidates_profile_get';
 const RESUME_UPLOAD_PATH = '/api/v1/candidates/profile/resume';
@@ -206,7 +206,7 @@ export function createHirePoolResumeRouter({ request = requestJson, now = Date.n
           error: {
             code: error.code === 'LIMIT_FILE_SIZE' ? 'FILE_TOO_LARGE' : 'UPLOAD_ERROR',
             message: error.code === 'LIMIT_FILE_SIZE'
-              ? 'Resume PDF must be 5 MB or smaller.'
+              ? 'Resume PDF must be 4 MB or smaller.'
               : 'Resume upload could not be read.'
           }
         });

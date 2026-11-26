@@ -130,7 +130,15 @@ var AssistantSDKBundle = (() => {
   var HIREPOOL_LOGIN_ACTION = "hirepool_login";
   var HIREPOOL_SIGNUP_ACTION = "hirepool_signup";
   var activeAccountWindow = null;
-  function getHirePoolAccountUrl(currentUrl, action = HIREPOOL_LOGIN_ACTION) {
+  function resolveAppLoginUrl(appLoginUrl) {
+    try {
+      const url = new URL(appLoginUrl);
+      if (url.protocol === "https:" || url.protocol === "http:") return url.href;
+    } catch {
+    }
+    return HIREPOOL_LOCAL_LOGIN_URL;
+  }
+  function getHirePoolAccountUrl(currentUrl, action = HIREPOOL_LOGIN_ACTION, appLoginUrl = null) {
     let pageUrl;
     try {
       pageUrl = new URL(currentUrl);
@@ -145,18 +153,19 @@ var AssistantSDKBundle = (() => {
       throw new TypeError("Unsupported HirePool account action");
     }
     const route = isSignup ? "/register" : "/login";
+    const loginBase = resolveAppLoginUrl(appLoginUrl);
     if (pageUrl.origin === HIREPOOL_PUBLIC_SITE_ORIGIN) {
-      return new URL(route, HIREPOOL_LOCAL_LOGIN_URL).href;
+      return new URL(route, loginBase).href;
     }
-    const accountUrl = new URL(route, HIREPOOL_LOCAL_LOGIN_URL);
+    const accountUrl = new URL(route, loginBase);
     accountUrl.searchParams.set("assistant_origin", pageUrl.origin);
     return accountUrl.href;
   }
-  function openHirePoolAccount({ currentUrl, openWindow, action = HIREPOOL_LOGIN_ACTION }) {
+  function openHirePoolAccount({ currentUrl, openWindow, action = HIREPOOL_LOGIN_ACTION, appLoginUrl = null }) {
     if (typeof openWindow !== "function") {
       throw new TypeError("A browser window opener is required");
     }
-    const accountUrl = getHirePoolAccountUrl(currentUrl, action);
+    const accountUrl = getHirePoolAccountUrl(currentUrl, action, appLoginUrl);
     let accountWindow;
     try {
       accountWindow = openWindow("about:blank", "_blank");
@@ -959,7 +968,7 @@ var AssistantSDKBundle = (() => {
   }
 
   // widget/src/hirepool-resume.js
-  var HIREPOOL_RESUME_MAX_BYTES = 5 * 1024 * 1024;
+  var HIREPOOL_RESUME_MAX_BYTES = 4 * 1024 * 1024;
   var HIREPOOL_RESUME_STATES = Object.freeze({
     IDLE: "IDLE",
     FILE_SELECTED: "FILE_SELECTED",
@@ -990,7 +999,7 @@ var AssistantSDKBundle = (() => {
       return "Only PDF resumes are supported.";
     }
     if (file.size < 1) return "The selected PDF is empty.";
-    if (file.size > HIREPOOL_RESUME_MAX_BYTES) return "Resume PDFs must be 5 MB or smaller.";
+    if (file.size > HIREPOOL_RESUME_MAX_BYTES) return "Resume PDFs must be 4 MB or smaller.";
     return null;
   }
   function formatHirePoolResumeSize(bytes) {
@@ -1787,7 +1796,7 @@ var AssistantSDKBundle = (() => {
     "http://localhost:5173",
     "http://127.0.0.1:5173"
   ]);
-  function isSafeVerificationUrl(rawUrl) {
+  function isSafeVerificationUrl(rawUrl, extraOrigins = []) {
     if (typeof rawUrl !== "string" || !rawUrl.trim()) return false;
     let parsed;
     try {
@@ -1797,8 +1806,9 @@ var AssistantSDKBundle = (() => {
     }
     if (!["http:", "https:"].includes(parsed.protocol)) return false;
     if (parsed.username || parsed.password) return false;
-    if (!APPROVED_VERIFICATION_ORIGINS.has(parsed.origin)) return false;
-    if (!parsed.pathname.startsWith("/auth/verify")) return false;
+    const approved = APPROVED_VERIFICATION_ORIGINS.has(parsed.origin) || Array.isArray(extraOrigins) && extraOrigins.includes(parsed.origin);
+    if (!approved) return false;
+    if (!parsed.pathname.startsWith("/auth/verify") && parsed.pathname !== "/verify-email") return false;
     return Boolean(parsed.searchParams.get("token"));
   }
   function parseHirePoolRoleChoice(text) {
@@ -1819,8 +1829,9 @@ var AssistantSDKBundle = (() => {
     return null;
   }
   var HirePoolSignupCoordinator = class {
-    constructor({ apiClient, onAuthenticated, onHandoff, onStateChange, onAddMessage } = {}) {
+    constructor({ apiClient, onAuthenticated, onHandoff, onStateChange, onAddMessage, getApprovedOrigins } = {}) {
       this.apiClient = apiClient;
+      this.getApprovedOrigins = typeof getApprovedOrigins === "function" ? getApprovedOrigins : () => [];
       this.onAuthenticated = onAuthenticated;
       this.onHandoff = onHandoff;
       this.onStateChange = onStateChange;
@@ -1899,7 +1910,7 @@ var AssistantSDKBundle = (() => {
           email: result.email,
           userType: result.userType
         };
-        this.verificationUrl = isSafeVerificationUrl(result?.verificationUrl) ? result.verificationUrl : null;
+        this.verificationUrl = isSafeVerificationUrl(result?.verificationUrl, this.getApprovedOrigins()) ? result.verificationUrl : null;
         this._verifiedTransitioned = false;
         this.setState(HIREPOOL_SIGNUP_STATES.REGISTRATION_CONFIRMED, {
           session: this.session,
@@ -1921,7 +1932,7 @@ var AssistantSDKBundle = (() => {
         throw new Error("No active registration session.");
       }
       const result = await this.apiClient.resendSignupVerification({ signupToken: this.session.signupToken });
-      if (isSafeVerificationUrl(result?.verificationUrl)) {
+      if (isSafeVerificationUrl(result?.verificationUrl, this.getApprovedOrigins())) {
         this.verificationUrl = result.verificationUrl;
         if (this.state === HIREPOOL_SIGNUP_STATES.EMAIL_VERIFICATION_PENDING) {
           this.setState(HIREPOOL_SIGNUP_STATES.EMAIL_VERIFICATION_PENDING, {
@@ -2316,11 +2327,12 @@ var AssistantSDKBundle = (() => {
     onCancel,
     notVerifiedYet = false,
     message = null,
-    error = null
+    error = null,
+    approvedOrigins = []
   }) {
     const card = document.createElement("div");
     card.className = "ai-action-card ai-signup-card";
-    const safeUrl = isSafeVerificationUrl(verificationUrl) ? verificationUrl : null;
+    const safeUrl = isSafeVerificationUrl(verificationUrl, approvedOrigins) ? verificationUrl : null;
     const introText = safeUrl ? `Your verification email has been sent to <strong>${escapeHtml2(email)}</strong>. You can verify your email using the button below.` : `We've sent a verification link to <strong>${escapeHtml2(email)}</strong>.`;
     const hintHtml = safeUrl ? "Click <strong>Verify Email</strong> below to confirm your address. Once verified, we'll automatically load your profile setup here." : "<strong>Check your email:</strong> Open the verification link sent to your inbox to verify your account. We'll detect verification automatically when you return, or you can check status below.";
     card.innerHTML = `
@@ -2816,6 +2828,7 @@ var AssistantSDKBundle = (() => {
       this.hirePoolResumeCard = null;
       this.hirePoolSignup = new HirePoolSignupCoordinator({
         apiClient: this.apiClient,
+        getApprovedOrigins: () => this._getApprovedAppOrigins(),
         onAuthenticated: async (session) => {
           await this._handleHirePoolSignupSuccess(session);
         },
@@ -4716,6 +4729,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
           notVerifiedYet: Boolean(data.notVerifiedYet),
           message: data.message,
           error: data.error,
+          approvedOrigins: this._getApprovedAppOrigins(),
           onVerifyClick: (url) => {
             if (typeof window !== "undefined" && typeof window.open === "function") {
               window.open(url, "_blank", "noopener,noreferrer");
@@ -5162,7 +5176,7 @@ If HirePool asks you to log in, use the email and password you just set up.`;
       const allowed = files.filter((f) => settings.allowedExtensions.includes(`.${String(f.name || "").split(".").pop().toLowerCase()}`) && Number.isFinite(f.size) && f.size > 0 && f.size <= settings.maxSizeBytes);
       const skipped = files.length - allowed.length;
       if (!allowed.length) {
-        this.postAssistantNote("Those files can\u2019t be read here. Upload resumes as **PDF, DOCX or TXT**, up to 10 MB each.");
+        this.postAssistantNote("Those files can\u2019t be read here. Upload resumes as **PDF, DOCX or TXT**, up to 4 MB each.");
         return;
       }
       const consent = settings.consent;
@@ -5586,7 +5600,8 @@ If HirePool asks you to log in, use the email and password you just set up.`;
         try {
           const result = openHirePoolLogin({
             currentUrl: typeof window !== "undefined" ? window.location.href : "http://localhost:3000",
-            openWindow: (...args) => typeof window !== "undefined" ? window.open(...args) : null
+            openWindow: (...args) => typeof window !== "undefined" ? window.open(...args) : null,
+            appLoginUrl: this._getAppLoginUrl()
           });
           statusMsg.style.display = "flex";
           statusMsg.className = "ai-action-status-msg info";
@@ -5736,6 +5751,15 @@ If HirePool asks you to log in, use the email and password you just set up.`;
     _syncWebsiteChatState() {
       if (!this.container || this.options?.surface !== "website") return;
       this.container.classList.toggle("ai-has-chat", this.messages.some((m) => m.role === "user"));
+    }
+    /** The configured HirePool app origin (from HIREPOOL_APP_LOGIN_URL), for verification links. */
+    _getApprovedAppOrigins() {
+      const loginUrl = this._getAppLoginUrl();
+      try {
+        return loginUrl ? [new URL(loginUrl).origin] : [];
+      } catch {
+        return [];
+      }
     }
     _getAppLoginUrl() {
       try {
@@ -6091,7 +6115,8 @@ ${tag}` : tag;
   ]);
   var DEFAULT_DOCUMENT_UPLOAD_SETTINGS = Object.freeze({
     enabled: true,
-    maxSizeBytes: 10 * 1024 * 1024,
+    // 4 MB: fits Vercel's ~4.5 MB request limit (including upload overhead).
+    maxSizeBytes: 4 * 1024 * 1024,
     allowedExtensions: SUPPORTED_EXTENSIONS,
     consent: Object.freeze({
       title: "Before processing this document",
@@ -6106,8 +6131,8 @@ ${tag}` : tag;
       throw new TypeError("documentUpload settings must be an object");
     }
     const maxSizeBytes = settings.maxSizeBytes ?? DEFAULT_DOCUMENT_UPLOAD_SETTINGS.maxSizeBytes;
-    if (!Number.isInteger(maxSizeBytes) || maxSizeBytes < 1 || maxSizeBytes > 10 * 1024 * 1024) {
-      throw new RangeError("documentUpload.maxSizeBytes must be an integer between 1 and 10485760");
+    if (!Number.isInteger(maxSizeBytes) || maxSizeBytes < 1 || maxSizeBytes > 4 * 1024 * 1024) {
+      throw new RangeError("documentUpload.maxSizeBytes must be an integer between 1 and 4194304");
     }
     const allowedExtensions = settings.allowedExtensions ?? DEFAULT_DOCUMENT_UPLOAD_SETTINGS.allowedExtensions;
     if (!Array.isArray(allowedExtensions) || allowedExtensions.length === 0 || allowedExtensions.some((extension) => !SUPPORTED_EXTENSIONS.includes(extension))) {
@@ -9820,14 +9845,16 @@ ${tag}` : tag;
           HIREPOOL_LOGIN_ACTION,
           () => openHirePoolLogin({
             currentUrl: window.location.href,
-            openWindow: (...args) => window.open(...args)
+            openWindow: (...args) => window.open(...args),
+            appLoginUrl: this.config?.behavior?.appLoginUrl || null
           })
         );
         this.actionHandlers.set(
           HIREPOOL_SIGNUP_ACTION,
           () => openHirePoolSignup({
             currentUrl: window.location.href,
-            openWindow: (...args) => window.open(...args)
+            openWindow: (...args) => window.open(...args),
+            appLoginUrl: this.config?.behavior?.appLoginUrl || null
           })
         );
       }

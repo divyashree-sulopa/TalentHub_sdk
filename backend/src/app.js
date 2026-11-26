@@ -25,6 +25,8 @@ import { registerHirePoolActions } from '../../integrations/hirepool/actions.js'
 import { registerHirePoolLocalDevelopmentIntegration } from '../../integrations/hirepool/local-development.js';
 import { hirePoolAuthRouter, isHirePoolLocalBridgeEnabled } from './local-integrations/hirepool-auth.js';
 import { HIREPOOL_LOCAL_DASHBOARD_ORIGINS } from '../../config/hirepool-site-policy.js';
+import { getConfiguredSurfaceOrigins } from './surface.js';
+import { getHirePoolOpenApiUrl } from './local-integrations/hirepool-api-url.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -92,7 +94,8 @@ export function createApp() {
     }
     if (
       requestPath.startsWith('/api/hirepool/') &&
-      HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(req.get('Origin')) &&
+      (HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(req.get('Origin')) ||
+        getConfiguredSurfaceOrigins().app.includes(req.get('Origin'))) &&
       !isDashboardSessionExchange &&
       !isDashboardSessionPreflight &&
       !isDashboardSessionValidate &&
@@ -176,7 +179,7 @@ export function createApp() {
     const isProd = process.env.NODE_ENV === 'production' || process.env.VERCEL;
     const defaultUrl = isProd
       ? 'https://api.hirepool.ai/api/openapi.json'
-      : (process.env.HIREPOOL_LOCAL_OPENAPI_URL || 'http://localhost:8000/api/openapi.json');
+      : getHirePoolOpenApiUrl();
     const openApiUrl = process.env.HIREPOOL_OPENAPI_URL || defaultUrl;
 
     try {

@@ -94,7 +94,7 @@ const APPROVED_VERIFICATION_ORIGINS = new Set([
  * @param {string|null|undefined} rawUrl
  * @returns {boolean}
  */
-export function isSafeVerificationUrl(rawUrl) {
+export function isSafeVerificationUrl(rawUrl, extraOrigins = []) {
   if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
   let parsed;
   try {
@@ -104,8 +104,12 @@ export function isSafeVerificationUrl(rawUrl) {
   }
   if (!['http:', 'https:'].includes(parsed.protocol)) return false;
   if (parsed.username || parsed.password) return false;
-  if (!APPROVED_VERIFICATION_ORIGINS.has(parsed.origin)) return false;
-  if (!parsed.pathname.startsWith('/auth/verify')) return false;
+  // Local app origins, plus the app address the server configured (HIREPOOL_APP_LOGIN_URL).
+  const approved = APPROVED_VERIFICATION_ORIGINS.has(parsed.origin) ||
+    (Array.isArray(extraOrigins) && extraOrigins.includes(parsed.origin));
+  if (!approved) return false;
+  // Local app: /auth/verify-email; production app: /verify-email.
+  if (!parsed.pathname.startsWith('/auth/verify') && parsed.pathname !== '/verify-email') return false;
   return Boolean(parsed.searchParams.get('token'));
 }
 
@@ -136,8 +140,10 @@ export function parseHirePoolRoleChoice(text) {
 }
 
 export class HirePoolSignupCoordinator {
-  constructor({ apiClient, onAuthenticated, onHandoff, onStateChange, onAddMessage } = {}) {
+  constructor({ apiClient, onAuthenticated, onHandoff, onStateChange, onAddMessage, getApprovedOrigins } = {}) {
     this.apiClient = apiClient;
+    // Extra trusted verification-link origins (the configured app address).
+    this.getApprovedOrigins = typeof getApprovedOrigins === 'function' ? getApprovedOrigins : () => [];
     this.onAuthenticated = onAuthenticated;
     this.onHandoff = onHandoff;
     this.onStateChange = onStateChange;
@@ -225,7 +231,7 @@ export class HirePoolSignupCoordinator {
         email: result.email,
         userType: result.userType
       };
-      this.verificationUrl = isSafeVerificationUrl(result?.verificationUrl)
+      this.verificationUrl = isSafeVerificationUrl(result?.verificationUrl, this.getApprovedOrigins())
         ? result.verificationUrl
         : null;
       this._verifiedTransitioned = false;
@@ -251,7 +257,7 @@ export class HirePoolSignupCoordinator {
       throw new Error('No active registration session.');
     }
     const result = await this.apiClient.resendSignupVerification({ signupToken: this.session.signupToken });
-    if (isSafeVerificationUrl(result?.verificationUrl)) {
+    if (isSafeVerificationUrl(result?.verificationUrl, this.getApprovedOrigins())) {
       this.verificationUrl = result.verificationUrl;
       if (this.state === HIREPOOL_SIGNUP_STATES.EMAIL_VERIFICATION_PENDING) {
         this.setState(HIREPOOL_SIGNUP_STATES.EMAIL_VERIFICATION_PENDING, {
@@ -718,11 +724,12 @@ export function renderVerificationCard({
   onCancel,
   notVerifiedYet = false,
   message = null,
-  error = null
+  error = null,
+  approvedOrigins = []
 }) {
   const card = document.createElement('div');
   card.className = 'ai-action-card ai-signup-card';
-  const safeUrl = isSafeVerificationUrl(verificationUrl) ? verificationUrl : null;
+  const safeUrl = isSafeVerificationUrl(verificationUrl, approvedOrigins) ? verificationUrl : null;
   const introText = safeUrl
     ? `Your verification email has been sent to <strong>${escapeHtml(email)}</strong>. You can verify your email using the button below.`
     : `We've sent a verification link to <strong>${escapeHtml(email)}</strong>.`;

@@ -952,9 +952,14 @@ export function formatHirePoolReadResults(dynamicResults, requestText = '', subm
   return formatGeneralReadResults(dynamicResults);
 }
 
+/** A page in the HirePool app, on the configured app address (HIREPOOL_APP_LOGIN_URL). */
+function getHirePoolAppPageUrl(path) {
+  return new URL(path, getHirePoolAppLoginUrl()).href;
+}
+
 export function formatClientApplicationsList(applications) {
   if (!Array.isArray(applications) || applications.length === 0) {
-    return 'No candidate applications have been received yet for your posted jobs.\n\nYou can review your active jobs or check the applications portal directly at: http://localhost:5173/client/applications';
+    return `No candidate applications have been received yet for your posted jobs.\n\nYou can review your active jobs or check the applications portal directly at: ${getHirePoolAppPageUrl('/client/applications')}`;
   }
   const lines = [
     '## Candidate Applications for Your Jobs\n',
@@ -982,7 +987,7 @@ export function formatClientApplicationsList(applications) {
     }
     lines.push('');
   }
-  lines.push('You can review and manage candidate applications at [Review Applications](http://localhost:5173/client/applications).');
+  lines.push(`You can review and manage candidate applications at [Review Applications](${getHirePoolAppPageUrl('/client/applications')}).`);
   return lines.join('\n');
 }
 
@@ -1008,7 +1013,7 @@ export function formatClientDashboardStats(stats) {
     '### Awaiting Your Action',
     `- **Shortlisted Candidates:** ${shortlisted}`,
     `- **Ready for Interviews:** ${shortlisted}`,
-    `- **Review Applications Portal:** [Review Applications](http://localhost:5173/client/applications)`,
+    `- **Review Applications Portal:** [Review Applications](${getHirePoolAppPageUrl('/client/applications')})`,
     '',
     '### Hiring Pipeline',
     `- **Applied:** ${totalApps}`,

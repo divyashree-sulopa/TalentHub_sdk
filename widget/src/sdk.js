@@ -251,12 +251,14 @@ class AssistantSDK {
         openHirePoolLogin({
           currentUrl: window.location.href,
           openWindow: (...args) => window.open(...args),
+          appLoginUrl: this.config?.behavior?.appLoginUrl || null,
         }),
       );
       this.actionHandlers.set(HIREPOOL_SIGNUP_ACTION, () =>
         openHirePoolSignup({
           currentUrl: window.location.href,
           openWindow: (...args) => window.open(...args),
+          appLoginUrl: this.config?.behavior?.appLoginUrl || null,
         }),
       );
     }

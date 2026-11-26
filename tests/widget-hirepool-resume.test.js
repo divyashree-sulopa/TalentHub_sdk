@@ -90,7 +90,7 @@ test('HirePool resume file selection accepts PDFs and rejects invalid, empty, an
     name: 'large.pdf',
     type: 'application/pdf',
     size: HIREPOOL_RESUME_MAX_BYTES + 1
-  }), /5 MB/);
+  }), /4 MB/);
   assert.equal(formatHirePoolResumeSize(1024 * 1024), '1.00 MB');
 });
 

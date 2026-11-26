@@ -23,6 +23,14 @@ import {
   getDynamicApiIntegration,
   registerDynamicApiIntegration
 } from '../../backend/src/dynamic-api/catalog.js';
+import {
+  getHirePoolApiBaseUrl,
+  getHirePoolApiHostname,
+  getHirePoolOpenApiUrl,
+  isHirePoolConnectionEnvironmentAllowed,
+  isHirePoolProductionConnectionAllowed,
+  isLocalHirePoolApi
+} from '../../backend/src/local-integrations/hirepool-api-url.js';
 
 export const HIREPOOL_LOCAL_INTEGRATION_ID = 'hirepool-local-development';
 export const HIREPOOL_LOCAL_ASSISTANT_ID = 'hirepool';
@@ -567,12 +575,22 @@ const responseFields = Object.freeze({
   ]
 });
 
+// HirePool API / OpenAPI addresses from settings (local default http://localhost:8000/).
 function getLocalApiBaseUrl(env = process.env) {
-  return env.HIREPOOL_LOCAL_API_BASE_URL || 'http://localhost:8000/';
+  return getHirePoolApiBaseUrl(env).href;
 }
 
 function getLocalOpenApiUrl(env = process.env) {
-  return env.HIREPOOL_LOCAL_OPENAPI_URL || 'http://localhost:8000/api/openapi.json';
+  return getHirePoolOpenApiUrl(env);
+}
+
+/** The API host, plus the OpenAPI host when it is served from somewhere else. */
+function getAllowedApiHosts(env = process.env) {
+  const hosts = new Set([getHirePoolApiHostname(env)]);
+  try {
+    hosts.add(new URL(getLocalOpenApiUrl(env)).hostname);
+  } catch {}
+  return [...hosts];
 }
 
 function safeReviewText(value, maxLength = 400) {
@@ -1068,9 +1086,11 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
 }
 
 export function registerHirePoolLocalDevelopmentIntegration(options = {}) {
+  // Local development (as before), or production with the explicit HTTPS opt-in.
+  const localDevelopment = process.env.NODE_ENV === 'development' && process.env.VERCEL_ENV !== 'production';
   if (
-    process.env.NODE_ENV !== 'development' ||
-    process.env.VERCEL_ENV === 'production' ||
+    !(localDevelopment || isHirePoolProductionConnectionAllowed(process.env)) ||
+    !isHirePoolConnectionEnvironmentAllowed(process.env) ||
     process.env.ENABLE_HIREPOOL_LOCAL_BRIDGE !== 'true' ||
     process.env.DYNAMIC_API_DISCOVERY_ENABLED !== 'true'
   ) {
@@ -1091,14 +1111,15 @@ export function registerHirePoolLocalDevelopmentIntegration(options = {}) {
     applicationId: HIREPOOL_LOCAL_APPLICATION_ID,
     openApiSpecUrl: getLocalOpenApiUrl(),
     apiBaseUrl: getLocalApiBaseUrl(),
-    allowedHosts: ['localhost'],
+    allowedHosts: getAllowedApiHosts(),
     allowedOperationIds,
     destructiveOperationIds: [
       'withdraw_application_api_v1_applications__application_id__withdraw_post'
     ],
     responseFields,
     roleOperationIds,
-    allowLocalDevelopment: true,
+    // Plain-HTTP localhost only for a local API; a production HTTPS API needs none.
+    allowLocalDevelopment: isLocalHirePoolApi(),
     enabled: true,
     authenticationRequired: true,
     dynamicDiscovery,

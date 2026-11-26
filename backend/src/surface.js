@@ -82,6 +82,20 @@ export function getSurfaceOrigins(env = process.env) {
 }
 
 /**
+ * Only the website / app origins set in HIREPOOL_WEBSITE_ORIGINS and
+ * HIREPOOL_APP_ORIGINS (no built-in defaults). Origin checks add these to
+ * their local defaults, so a deployment can name its real addresses.
+ * @param {NodeJS.ProcessEnv} [env]
+ * @returns {{ website: readonly string[], app: readonly string[] }}
+ */
+export function getConfiguredSurfaceOrigins(env = process.env) {
+  return {
+    website: env.HIREPOOL_WEBSITE_ORIGINS ? parseOriginList(env.HIREPOOL_WEBSITE_ORIGINS, 'HIREPOOL_WEBSITE_ORIGINS', env) : [],
+    app: env.HIREPOOL_APP_ORIGINS ? parseOriginList(env.HIREPOOL_APP_ORIGINS, 'HIREPOOL_APP_ORIGINS', env) : []
+  };
+}
+
+/**
  * Resolve the assistant surface for a request.
  * @param {{ get?: (name: string) => string | undefined, headers?: object }} req
  * @param {NodeJS.ProcessEnv} [env]

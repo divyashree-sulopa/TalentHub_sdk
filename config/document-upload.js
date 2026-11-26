@@ -14,7 +14,8 @@ const SUPPORTED_EXTENSIONS = Object.freeze([
 
 export const DEFAULT_DOCUMENT_UPLOAD_SETTINGS = Object.freeze({
   enabled: true,
-  maxSizeBytes: 10 * 1024 * 1024,
+  // 4 MB: fits Vercel's ~4.5 MB request limit (including upload overhead).
+  maxSizeBytes: 4 * 1024 * 1024,
   allowedExtensions: SUPPORTED_EXTENSIONS,
   consent: Object.freeze({
     title: 'Before processing this document',
@@ -31,8 +32,8 @@ export function normalizeDocumentUploadSettings(settings = {}) {
   }
 
   const maxSizeBytes = settings.maxSizeBytes ?? DEFAULT_DOCUMENT_UPLOAD_SETTINGS.maxSizeBytes;
-  if (!Number.isInteger(maxSizeBytes) || maxSizeBytes < 1 || maxSizeBytes > 10 * 1024 * 1024) {
-    throw new RangeError('documentUpload.maxSizeBytes must be an integer between 1 and 10485760');
+  if (!Number.isInteger(maxSizeBytes) || maxSizeBytes < 1 || maxSizeBytes > 4 * 1024 * 1024) {
+    throw new RangeError('documentUpload.maxSizeBytes must be an integer between 1 and 4194304');
   }
 
   const allowedExtensions = settings.allowedExtensions ?? DEFAULT_DOCUMENT_UPLOAD_SETTINGS.allowedExtensions;

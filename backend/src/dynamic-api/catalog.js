@@ -4,6 +4,7 @@ import { ActionRegistry } from '../actions/registry.js';
 import { getAllowedApiHosts, getDynamicApiLimits, requestJson, requestText, validateApiUrl } from './secure-http.js';
 import { parseOpenApiSpec } from './openapi.js';
 import { getStateStore, markStateTouched, registerStateFlushHandler } from '../state/state-store.js';
+import { isHirePoolProductionConnectionAllowed } from '../local-integrations/hirepool-api-url.js';
 
 const integrations = new Map();
 const pendingConfirmations = new Map();
@@ -25,9 +26,10 @@ const forbiddenHeaders = new Set([
 ]);
 
 export function isDynamicApiDiscoveryEnabled(env = process.env) {
-  return env.DYNAMIC_API_DISCOVERY_ENABLED === 'true' &&
-    env.NODE_ENV !== 'production' &&
-    env.VERCEL_ENV !== 'production';
+  if (env.DYNAMIC_API_DISCOVERY_ENABLED !== 'true') return false;
+  const production = env.NODE_ENV === 'production' || env.VERCEL_ENV === 'production';
+  // Production only for the explicitly enabled HTTPS HirePool connection.
+  return !production || isHirePoolProductionConnectionAllowed(env);
 }
 
 function assertUrlConfiguration(value, name) {

@@ -1,4 +1,4 @@
-export const HIREPOOL_RESUME_MAX_BYTES = 5 * 1024 * 1024;
+export const HIREPOOL_RESUME_MAX_BYTES = 4 * 1024 * 1024; // fits Vercel's request size limit
 
 export const HIREPOOL_RESUME_STATES = Object.freeze({
   IDLE: 'IDLE',
@@ -31,7 +31,7 @@ export function validateHirePoolResumeFile(file) {
     return 'Only PDF resumes are supported.';
   }
   if (file.size < 1) return 'The selected PDF is empty.';
-  if (file.size > HIREPOOL_RESUME_MAX_BYTES) return 'Resume PDFs must be 5 MB or smaller.';
+  if (file.size > HIREPOOL_RESUME_MAX_BYTES) return 'Resume PDFs must be 4 MB or smaller.';
   return null;
 }
 

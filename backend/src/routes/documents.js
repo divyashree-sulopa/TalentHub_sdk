@@ -50,11 +50,11 @@ async function buildWebsiteDocumentInsight(parsed, session, sessionOptions) {
 
 export const documentsRouter = Router();
 
-// Configure multer for memory storage with 10MB limit
+// Configure multer for memory storage with a 4 MB limit (fits Vercel's request size limit)
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
-    fileSize: 10 * 1024 * 1024 // 10MB
+    fileSize: 4 * 1024 * 1024 // 4 MB
   }
 });
 
@@ -71,7 +71,7 @@ function handleMulterUpload(req, res, next) {
         return res.status(400).json({
           error: {
             code: 'FILE_TOO_LARGE',
-            message: 'Uploaded file exceeds the maximum allowed size of 10MB'
+            message: 'Uploaded file exceeds the maximum allowed size of 4 MB'
           }
         });
       }

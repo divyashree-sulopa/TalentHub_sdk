@@ -2,7 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { storeHirePoolSession, findHirePoolContextBySdkCredential } from '../local-integrations/hirepool-session-store.js';
 import { isHirePoolLocalBridgeEnabled } from '../local-integrations/hirepool-auth.js';
-import { ASSISTANT_SURFACES, getHirePoolAppHomeUrl, resolveAssistantSurface } from '../surface.js';
+import { ASSISTANT_SURFACES, getConfiguredSurfaceOrigins, getHirePoolAppHomeUrl, resolveAssistantSurface } from '../surface.js';
 import { SharedRecordMap } from '../state/state-store.js';
 import { extractCredentials, AuthenticationError } from '../middleware/auth.js';
 import {
@@ -21,6 +21,7 @@ import {
   getMissingMandatoryFields,
   LIMITS
 } from '../local-integrations/hirepool-validation.js';
+import { hirePoolApiTarget } from '../local-integrations/hirepool-api-url.js';
 
 export {
   validatePhoneNumber,
@@ -56,17 +57,21 @@ export function clearAllOnboardingSessions() {
   onboardingSessions.clear();
 }
 
+// HirePool API address from settings (HIREPOOL_API_BASE_URL); local default http://localhost:8000/,
+// reached over loopback with the local Host header, exactly as before.
 function getHirePoolBaseUrl(env = process.env) {
-  const value = env.HIREPOOL_LOCAL_API_BASE_URL || 'http://localhost:8000/';
-  const url = new URL(value);
-  url.hostname = '127.0.0.1';
-  return url;
+  return hirePoolApiTarget('./', { env }).url;
+}
+
+/** The local Host header (localhost:8000) for a local API; nothing for a remote HTTPS API. */
+function apiHostHeader(env = process.env) {
+  return hirePoolApiTarget('./', { env }).headers;
 }
 
 function getApprovedVerificationOrigins(env = process.env) {
   // Local-only for now: verification links must point at the local HirePool app
   // (add a deployed app with HIREPOOL_FRONTEND_URL when it is time).
-  const origins = new Set([...HIREPOOL_LOCAL_DASHBOARD_ORIGINS]);
+  const origins = new Set([...HIREPOOL_LOCAL_DASHBOARD_ORIGINS, ...getConfiguredSurfaceOrigins(env).app]);
   const configuredFrontendUrl = env.HIREPOOL_FRONTEND_URL || env.HIREPOOL_PUBLIC_FRONTEND_URL;
   if (configuredFrontendUrl) {
     try {
@@ -94,7 +99,8 @@ export function extractSafeVerificationUrl(rawUrl, env = process.env) {
   const approvedOrigins = getApprovedVerificationOrigins(env);
   if (!approvedOrigins.has(parsed.origin)) return null;
 
-  if (!parsed.pathname.startsWith('/auth/verify')) return null;
+  // Local app: /auth/verify-email; production app: /verify-email.
+  if (!parsed.pathname.startsWith('/auth/verify') && parsed.pathname !== '/verify-email') return null;
   if (!parsed.searchParams.get('token')) return null;
 
   return parsed.toString();
@@ -105,7 +111,7 @@ function assertPublicOrigin(req) {
   if (process.env.NODE_ENV === 'test' && !origin) {
     return; // Allow test requests without origin
   }
-  if (!origin || !HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS.includes(origin)) {
+  if (!origin || !(HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS.includes(origin) || getConfiguredSurfaceOrigins().website.includes(origin))) {
     const error = new Error('Local HirePool bridge origin is not allowed');
     error.statusCode = 403;
     error.code = 'ORIGIN_NOT_ALLOWED';
@@ -146,7 +152,7 @@ export function createHirePoolSignupRouter({
       const baseUrl = getBaseUrl();
       const targetUrl = new URL(`api/v1/agreements/current?role=${encodeURIComponent(role)}`, baseUrl);
       const response = await fetchImpl(targetUrl, {
-        headers: { Accept: 'application/json', Host: 'localhost:8000' }
+        headers: { Accept: 'application/json', ...apiHostHeader() }
       });
 
       if (!response.ok) {
@@ -230,7 +236,7 @@ export function createHirePoolSignupRouter({
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Host: 'localhost:8000'
+          ...apiHostHeader()
         },
         body: JSON.stringify({
           email: String(email).trim().toLowerCase(),
@@ -328,7 +334,7 @@ export function createHirePoolSignupRouter({
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Host: 'localhost:8000'
+          ...apiHostHeader()
         },
         body: JSON.stringify({ email: targetEmail.toLowerCase() })
       });
@@ -376,7 +382,7 @@ export function createHirePoolSignupRouter({
         });
       }
 
-      // Extract token if user pasted full URL (e.g., http://localhost:5173/auth/verify-email?token=xyz)
+      // Extract token if user pasted full URL (e.g. .../auth/verify-email?token=xyz or .../verify-email?token=xyz)
       let rawToken = verificationToken.trim();
       if (rawToken.includes('token=')) {
         try {
@@ -396,7 +402,7 @@ export function createHirePoolSignupRouter({
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Host: 'localhost:8000'
+          ...apiHostHeader()
         },
         body: JSON.stringify({ token: rawToken })
       });
@@ -470,7 +476,7 @@ export function createHirePoolSignupRouter({
         let meRes = await fetchImpl(meUrl, {
           headers: {
             Accept: 'application/json',
-            Host: 'localhost:8000',
+            ...apiHostHeader(),
             Authorization: `Bearer ${session.accessToken}`
           }
         });
@@ -482,7 +488,7 @@ export function createHirePoolSignupRouter({
             headers: {
               'Content-Type': 'application/json',
               Accept: 'application/json',
-              Host: 'localhost:8000'
+              ...apiHostHeader()
             },
             body: JSON.stringify({ refresh_token: session.refreshToken })
           });
@@ -496,7 +502,7 @@ export function createHirePoolSignupRouter({
               meRes = await fetchImpl(meUrl, {
                 headers: {
                   Accept: 'application/json',
-                  Host: 'localhost:8000',
+                  ...apiHostHeader(),
                   Authorization: `Bearer ${session.accessToken}`
                 }
               });
@@ -721,7 +727,7 @@ export function createHirePoolSignupRouter({
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Host: 'localhost:8000',
+          ...apiHostHeader(),
           Authorization: `Bearer ${session.accessToken}`
         },
         body: JSON.stringify(formattedBody)
@@ -743,7 +749,7 @@ export function createHirePoolSignupRouter({
       const readbackRes = await fetchImpl(readbackUrl, {
         headers: {
           Accept: 'application/json',
-          Host: 'localhost:8000',
+          ...apiHostHeader(),
           Authorization: `Bearer ${session.accessToken}`
         }
       });

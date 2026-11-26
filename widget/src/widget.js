@@ -60,6 +60,7 @@ export class AssistantWidgetUI {
     this.hirePoolResumeCard = null;
     this.hirePoolSignup = new HirePoolSignupCoordinator({
       apiClient: this.apiClient,
+      getApprovedOrigins: () => this._getApprovedAppOrigins(),
       onAuthenticated: async (session) => {
         await this._handleHirePoolSignupSuccess(session);
       },
@@ -2226,6 +2227,7 @@ export class AssistantWidgetUI {
         notVerifiedYet: Boolean(data.notVerifiedYet),
         message: data.message,
         error: data.error,
+        approvedOrigins: this._getApprovedAppOrigins(),
         onVerifyClick: (url) => {
           if (typeof window !== 'undefined' && typeof window.open === 'function') {
             window.open(url, '_blank', 'noopener,noreferrer');
@@ -2712,7 +2714,7 @@ export class AssistantWidgetUI {
       Number.isFinite(f.size) && f.size > 0 && f.size <= settings.maxSizeBytes);
     const skipped = files.length - allowed.length;
     if (!allowed.length) {
-      this.postAssistantNote('Those files can’t be read here. Upload resumes as **PDF, DOCX or TXT**, up to 10 MB each.');
+      this.postAssistantNote('Those files can’t be read here. Upload resumes as **PDF, DOCX or TXT**, up to 4 MB each.');
       return;
     }
     const consent = settings.consent;
@@ -3149,7 +3151,8 @@ export class AssistantWidgetUI {
       try {
         const result = openHirePoolLogin({
           currentUrl: typeof window !== 'undefined' ? window.location.href : 'http://localhost:3000',
-          openWindow: (...args) => (typeof window !== 'undefined' ? window.open(...args) : null)
+          openWindow: (...args) => (typeof window !== 'undefined' ? window.open(...args) : null),
+          appLoginUrl: this._getAppLoginUrl()
         });
         statusMsg.style.display = 'flex';
         statusMsg.className = 'ai-action-status-msg info';
@@ -3322,6 +3325,16 @@ export class AssistantWidgetUI {
   _syncWebsiteChatState() {
     if (!this.container || this.options?.surface !== 'website') return;
     this.container.classList.toggle('ai-has-chat', this.messages.some(m => m.role === 'user'));
+  }
+
+  /** The configured HirePool app origin (from HIREPOOL_APP_LOGIN_URL), for verification links. */
+  _getApprovedAppOrigins() {
+    const loginUrl = this._getAppLoginUrl();
+    try {
+      return loginUrl ? [new URL(loginUrl).origin] : [];
+    } catch {
+      return [];
+    }
   }
 
   _getAppLoginUrl() {

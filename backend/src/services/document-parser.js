@@ -62,7 +62,7 @@ export class CorruptDocumentError extends DocumentProcessingError {
   }
 }
 
-const MAX_DOCUMENT_SIZE_BYTES = 10 * 1024 * 1024; // 10 MB
+const MAX_DOCUMENT_SIZE_BYTES = 4 * 1024 * 1024; // 4 MB (Vercel request size limit)
 const MAX_EXTRACTED_CHARS = 100000; // ~25,000 tokens
 
 /**

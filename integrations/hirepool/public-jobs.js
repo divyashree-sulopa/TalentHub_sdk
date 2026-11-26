@@ -8,6 +8,7 @@
  */
 
 import { z } from 'zod';
+import { hirePoolApiTarget } from '../../backend/src/local-integrations/hirepool-api-url.js';
 
 export const HIREPOOL_JOB_SEARCH_ACTION = 'hirepool_search_jobs';
 const MAX_RESULTS = 3;
@@ -39,11 +40,9 @@ export function createPublicJobSearchAction() {
   };
 }
 
-function getPublicApiBase(env = process.env) {
-  const url = new URL(env.HIREPOOL_LOCAL_API_BASE_URL || 'http://localhost:8000/');
-  // Local-only for now: talk to the local HirePool API over loopback, like the rest of the bridge.
-  if (url.hostname === 'localhost') url.hostname = '127.0.0.1';
-  return url;
+// The HirePool API address from settings; a local API is reached over loopback.
+function getPublicApiTarget(env = process.env) {
+  return hirePoolApiTarget('api/v1/public/jobs', { env });
 }
 
 function cleanText(value, max = 120) {
@@ -63,7 +62,7 @@ function normalizeJob(item) {
 }
 
 async function requestPublicJobs(params, { fetchImpl, env }) {
-  const url = new URL('api/v1/public/jobs', getPublicApiBase(env));
+  const { url, headers: targetHeaders } = getPublicApiTarget(env);
   url.searchParams.set('page_size', String(MAX_RESULTS));
   if (params.query) url.searchParams.set('q', params.query);
   if (params.location) url.searchParams.set('location', params.location);
@@ -75,7 +74,7 @@ async function requestPublicJobs(params, { fetchImpl, env }) {
 
   const response = await fetchImpl(url, {
     method: 'GET',
-    headers: { Accept: 'application/json' },
+    headers: { Accept: 'application/json', ...targetHeaders },
     redirect: 'error',
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS)
   });

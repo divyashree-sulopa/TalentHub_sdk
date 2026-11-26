@@ -22,6 +22,22 @@ import {
   HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS
 } from '../../../config/hirepool-site-policy.js';
 import { HIREPOOL_LOCAL_EXTENSION_ORIGIN } from '../../../extension/hirepool/site-policy.js';
+import {
+  getHirePoolApiBaseUrl,
+  hirePoolApiTarget,
+  isHirePoolConnectionEnvironmentAllowed
+} from './hirepool-api-url.js';
+import { getConfiguredSurfaceOrigins } from '../surface.js';
+
+/** Local website origins plus any set in HIREPOOL_WEBSITE_ORIGINS. */
+function isPublicSiteOrigin(origin) {
+  return HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS.includes(origin) || getConfiguredSurfaceOrigins().website.includes(origin);
+}
+
+/** Local dashboard origins plus any set in HIREPOOL_APP_ORIGINS. */
+function isDashboardOrigin(origin) {
+  return HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(origin) || getConfiguredSurfaceOrigins().app.includes(origin);
+}
 
 const ALLOWED_USER_TYPES = new Set(['candidate', 'client', 'consultancy']);
 const ALLOWED_CLIENT_ROLES = new Set(['admin', 'hiring_manager', 'recruiter']);
@@ -30,34 +46,17 @@ const MAX_IDENTITY_RESPONSE_BYTES = 32 * 1024;
 const IDENTITY_CACHE_MS = 30 * 1000;
 const warnedOrigins = new Set();
 
+// On in local development / tests (as before), or in production only with
+// ENABLE_HIREPOOL_PRODUCTION_CONNECTION=true and an HTTPS HIREPOOL_API_BASE_URL.
 export function isHirePoolLocalBridgeEnabled(env = process.env) {
-  return (env.NODE_ENV === 'development' || env.NODE_ENV === 'test') &&
-    env.VERCEL_ENV !== 'production' &&
+  return isHirePoolConnectionEnvironmentAllowed(env) &&
     env.ENABLE_HIREPOOL_LOCAL_BRIDGE === 'true' &&
     env.DYNAMIC_API_DISCOVERY_ENABLED === 'true';
 }
 
+// The HirePool API address comes from settings (HIREPOOL_API_BASE_URL); local default http://localhost:8000/.
 function getLocalApiBaseUrl(env = process.env) {
-  const value = env.HIREPOOL_LOCAL_API_BASE_URL || 'http://localhost:8000/';
-  let url;
-  try {
-    url = new URL(value);
-  } catch {
-    throw new Error('HIREPOOL_LOCAL_API_BASE_URL must be the configured local HirePool API origin');
-  }
-  if (
-    url.protocol !== 'http:' ||
-    url.hostname !== 'localhost' ||
-    url.port !== '8000' ||
-    url.username ||
-    url.password ||
-    url.pathname !== '/' ||
-    url.search ||
-    url.hash
-  ) {
-    throw new Error('HIREPOOL_LOCAL_API_BASE_URL must be http://localhost:8000/');
-  }
-  return url;
+  return getHirePoolApiBaseUrl(env);
 }
 
 function getAllowedOrigins(env = process.env) {
@@ -68,6 +67,12 @@ function getAllowedOrigins(env = process.env) {
   const allowedOrigins = new Set();
   for (const origin of origins) {
     if (origin === HIREPOOL_LOCAL_EXTENSION_ORIGIN && isHirePoolLocalBridgeEnabled(env)) {
+      allowedOrigins.add(origin);
+      continue;
+    }
+
+    // Website / app addresses configured for this deployment.
+    if (isPublicSiteOrigin(origin) || isDashboardOrigin(origin)) {
       allowedOrigins.add(origin);
       continue;
     }
@@ -117,8 +122,8 @@ function assertPasswordLoginOrigin(req) {
   }
 
   const isDemo = origin === 'http://localhost:3100' || origin === 'http://127.0.0.1:3100';
-  const isPublic = HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS.includes(origin);
-  const isDashboard = HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(origin);
+  const isPublic = isPublicSiteOrigin(origin);
+  const isDashboard = isDashboardOrigin(origin);
   const isExtension = origin === HIREPOOL_LOCAL_EXTENSION_ORIGIN;
   let isConfiguredAllowed = false;
   try {
@@ -151,8 +156,8 @@ function assertSessionValidateOrigin(req) {
     }
     throw new AuthenticationError('Origin header is required', 'ORIGIN_NOT_ALLOWED');
   }
-  const isAllowedPublic = HIREPOOL_LOCAL_PUBLIC_SITE_ORIGINS.includes(origin);
-  const isAllowedDashboard = HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(origin);
+  const isAllowedPublic = isPublicSiteOrigin(origin);
+  const isAllowedDashboard = isDashboardOrigin(origin);
   const isAllowedExtension = origin === HIREPOOL_LOCAL_EXTENSION_ORIGIN;
   if (!isAllowedPublic && !isAllowedDashboard && !isAllowedExtension) {
     throw new AuthenticationError('Local HirePool bridge origin is not allowed', 'ORIGIN_NOT_ALLOWED');
@@ -169,22 +174,21 @@ function assertSessionOrigin(req) {
   const origin = req.get('Origin');
   if (
     origin !== HIREPOOL_LOCAL_EXTENSION_ORIGIN &&
-    !HIREPOOL_LOCAL_DASHBOARD_ORIGINS.includes(origin)
+    !isDashboardOrigin(origin)
   ) {
     throw new AuthenticationError('A trusted local HirePool account origin is required', 'ORIGIN_NOT_ALLOWED');
   }
 }
 
 async function requestHirePoolJson(url, accessToken) {
-  const requestUrl = new URL(url);
-  requestUrl.hostname = '127.0.0.1';
+  const { url: requestUrl, headers: targetHeaders } = hirePoolApiTarget(url);
   let response;
   try {
     response = await fetch(requestUrl, {
       method: 'GET',
       headers: {
         Accept: 'application/json',
-        Host: 'localhost:8000',
+        ...targetHeaders,
         Authorization: `Bearer ${accessToken}`
       },
       redirect: 'error',
@@ -353,8 +357,7 @@ hirePoolAuthRouter.post('/auth/password-login', async (req, res, next) => {
     }
 
     const baseUrl = getLocalApiBaseUrl();
-    const loginUrl = new URL('api/v1/auth/login', baseUrl);
-    loginUrl.hostname = '127.0.0.1';
+    const { url: loginUrl, headers: targetHeaders } = hirePoolApiTarget('api/v1/auth/login', { baseUrl });
 
     let upstreamResponse;
     try {
@@ -363,7 +366,7 @@ hirePoolAuthRouter.post('/auth/password-login', async (req, res, next) => {
         headers: {
           'Content-Type': 'application/json',
           Accept: 'application/json',
-          Host: 'localhost:8000'
+          ...targetHeaders
         },
         body: JSON.stringify({ email: emailStr.toLowerCase(), password }),
         redirect: 'error',
