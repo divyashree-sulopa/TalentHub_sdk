@@ -210,3 +210,33 @@ test('"no" after the job results gets a friendly answer, not a clarification', a
     globalThis.fetch = realFetch;
   }
 });
+
+test('"any" / "anywhere" as a location means no location filter (no "in any." in replies)', async () => {
+  const { isPlaceholderLocation, searchPublicHirePoolJobs, formatPublicJobResults, _clearPublicJobCache } = await import('../integrations/hirepool/public-jobs.js');
+  const { normalizeHirePoolJobSearchArguments } = await import('../backend/src/routes/chat.js');
+  for (const v of ['any', 'Any', 'anywhere', 'any location', 'Anywhere in India', 'pan India', 'no preference', 'flexible', 'N/A', 'any.']) {
+    assert.equal(isPlaceholderLocation(v), true, v);
+  }
+  for (const v of ['Bengaluru', 'Pune', 'Remote', 'Anantapur', 'New York']) {
+    assert.equal(isPlaceholderLocation(v), false, v);
+  }
+
+  _clearPublicJobCache();
+  const seen = [];
+  const fetchImpl = async url => {
+    seen.push(new URL(String(url)).searchParams.get('location'));
+    return new Response(JSON.stringify({ items: [], total: 0 }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  const result = await searchPublicHirePoolJobs({ query: 'software developer', location: 'any' }, { fetchImpl, env: {} });
+  assert.deepEqual(seen, [null], 'no location filter sent');
+  assert.equal(result.criteria.location, null);
+  const text = formatPublicJobResults(result);
+  assert.doesNotMatch(text, /\bin any\b/i);
+  assert.match(text, /software developer\*\* role on HirePool right now\./);
+
+  // Dashboard search: placeholder locations are dropped, real ones kept.
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'react developer', locations: 'anywhere' } }), { query: { query: 'react developer' } });
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'react developer', locations: ['any', 'Pune'] } }), { query: { query: 'react developer', locations: ['Pune'] } });
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { locations: 'any' } }), { query: {} });
+  assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'react developer', locations: 'Pune' } }), { query: { query: 'react developer', locations: 'Pune' } });
+});

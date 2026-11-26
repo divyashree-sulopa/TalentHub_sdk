@@ -70,6 +70,7 @@ import {
   formatPublicJobResults,
   formatPublicJobSearchUnavailable,
   HIREPOOL_JOB_SEARCH_ACTION,
+  isPlaceholderLocation,
   searchPublicHirePoolJobs
 } from '../../../integrations/hirepool/public-jobs.js';
 import { isHirePoolLocalBridgeEnabled } from '../local-integrations/hirepool-auth.js';
@@ -1807,7 +1808,16 @@ const GENERIC_JOB_SEARCH_WORDS = /\b(?:jobs?|op+[a-z]{0,2}rtunit(?:y|ies)|openin
  */
 export function normalizeHirePoolJobSearchArguments(argumentsValue = {}) {
   const query = argumentsValue?.query && typeof argumentsValue.query === 'object' ? { ...argumentsValue.query } : null;
-  if (!query || typeof query.query !== 'string') return argumentsValue;
+  // "any" / "anywhere" as a location means no location filter.
+  if (query && typeof query.locations === 'string' && isPlaceholderLocation(query.locations)) {
+    delete query.locations;
+  } else if (query && Array.isArray(query.locations)) {
+    const real = query.locations.filter(item => !isPlaceholderLocation(String(item)));
+    if (real.length) query.locations = real;
+    else delete query.locations;
+  }
+  if (query && typeof query.query !== 'string') return { ...argumentsValue, query };
+  if (!query) return argumentsValue;
   let cleaned = query.query.replace(GENERIC_JOB_SEARCH_WORDS, ' ').replace(/[^\w+#.\s-]/g, ' ').replace(/\s+/g, ' ').trim();
   // City names belong in HirePool's location filter, not the keyword.
   const city = cleaned.match(/\b(bengaluru|bangalore|mumbai|delhi|hyderabad|pune|chennai|noida|gurgaon|gurugram|kolkata|ahmedabad|kochi|coimbatore|jaipur|chandigarh|remote)\b/i);

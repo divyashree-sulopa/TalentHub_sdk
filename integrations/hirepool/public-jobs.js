@@ -94,13 +94,22 @@ async function requestPublicJobs(params, { fetchImpl, env }) {
   return value;
 }
 
+const PLACEHOLDER_LOCATION = /^(?:any|anywhere|any\s*where|all|everywhere|any\s+(?:city|location|place|where)|all\s+(?:cities|locations)|anywhere\s+in\s+india|pan[\s-]*india|no\s+preference|not\s+sure|flexible|open|none|n\/?a|na|-)$/i;
+
+/** True for "any", "anywhere", "no preference"... which mean: no location filter. */
+export function isPlaceholderLocation(value) {
+  return typeof value === 'string' && PLACEHOLDER_LOCATION.test(value.trim().replace(/[.!]+$/, ''));
+}
+
 /**
  * Search open jobs, relaxing the filters when nothing matches exactly.
  * @returns {Promise<{ jobs: object[], total: number, relaxed: null|'work_mode'|'location' , criteria: object }>}
  */
 export async function searchPublicHirePoolJobs(criteria, { fetchImpl = (...a) => globalThis.fetch(...a), env = process.env } = {}) {
   const query = cleanText(criteria.query, 100);
-  const location = cleanText(criteria.location, 100) || null;
+  const rawLocation = cleanText(criteria.location, 100);
+  // "any" / "anywhere" means no location filter (and nothing like "in any." in the reply).
+  const location = rawLocation && !isPlaceholderLocation(rawLocation) ? rawLocation : null;
   const workMode = WORK_MODES.includes(criteria.work_mode) ? criteria.work_mode : null;
   const normalized = { query, location, workMode };
 
