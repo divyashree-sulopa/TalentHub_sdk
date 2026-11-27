@@ -2219,6 +2219,13 @@ export class AssistantWidgetUI {
         role: data.role || this.hirePoolSignup.selectedRole,
         agreement: data.agreement || this.hirePoolSignup.agreement,
         loadAgreement: (role) => this.apiClient.getSignupAgreement(role),
+        email: data.email || '',
+        error: data.error || null,
+        errorCode: data.errorCode || null,
+        onSignIn: () => {
+          void this.hirePoolSignup.cancel();
+          this._goToLogin();
+        },
         onSubmit: (formData) => this.hirePoolSignup.submitSignup(formData),
         onCancel: () => void this.hirePoolSignup.cancel()
       });

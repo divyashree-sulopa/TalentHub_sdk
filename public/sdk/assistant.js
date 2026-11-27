@@ -1923,7 +1923,13 @@ var AssistantSDKBundle = (() => {
         });
         return result;
       } catch (error) {
-        this.setState(HIREPOOL_SIGNUP_STATES.SIGNUP_FORM, { error: error.message });
+        this.setState(HIREPOOL_SIGNUP_STATES.SIGNUP_FORM, {
+          error: error.message,
+          errorCode: error.code || null,
+          email,
+          role: this.selectedRole,
+          agreement: this.agreement
+        });
         throw error;
       }
     }
@@ -2309,7 +2315,18 @@ var AssistantSDKBundle = (() => {
     viewer.querySelector(".ai-agreement-viewer-x").focus();
     return viewer;
   }
-  function renderSignupFormCard({ role, agreement, onSubmit, onCancel, loadAgreement = null }) {
+  var EMAIL_ALREADY_REGISTERED = "EMAIL_ALREADY_REGISTERED";
+  function renderSignupFormCard({
+    role,
+    agreement,
+    onSubmit,
+    onCancel,
+    loadAgreement = null,
+    onSignIn = null,
+    email: initialEmail = "",
+    error: initialError = null,
+    errorCode: initialErrorCode = null
+  }) {
     const card = document.createElement("div");
     card.className = "ai-action-card ai-signup-card";
     const roleMeta = ROLE_DEFINITIONS[role] || { label: role, badge: "HirePool Account" };
@@ -2319,7 +2336,15 @@ var AssistantSDKBundle = (() => {
       <span class="ai-action-title">Sign up as ${escapeHtml2(roleMeta.label)}</span>
     </div>
     <p class="ai-action-explanation">Enter your details to create your ${escapeHtml2(roleMeta.label)} account. Passwords are encrypted directly and never shared with the AI model.</p>
-    
+
+    <div class="ai-account-exists" role="alert" style="display: none;">
+      <p class="ai-account-exists-text"></p>
+      <div class="ai-account-exists-actions">
+        <button type="button" class="ai-btn-action-confirm ai-account-exists-signin">Sign in</button>
+        <button type="button" class="ai-btn-action-cancel ai-account-exists-other">Use another email</button>
+      </div>
+    </div>
+
     <form class="ai-signup-form" autocomplete="off">
       <div class="ai-form-group">
         <label class="ai-form-label">Email Address *</label>
@@ -2354,10 +2379,46 @@ var AssistantSDKBundle = (() => {
   `;
     const form = card.querySelector("form");
     const errorBox = card.querySelector(".ai-form-error");
-    const submitBtn = card.querySelector(".ai-btn-action-confirm");
-    const cancelBtn = card.querySelector(".ai-btn-action-cancel");
+    const submitBtn = form.querySelector(".ai-btn-action-confirm");
+    const cancelBtn = form.querySelector(".ai-btn-action-cancel");
     const passwordInput = card.querySelector('input[name="password"]');
     const toggleBtn = card.querySelector(".ai-password-toggle");
+    const existsBox = card.querySelector(".ai-account-exists");
+    const emailInput = card.querySelector('input[name="email"]');
+    if (emailInput && typeof initialEmail === "string" && initialEmail) emailInput.value = initialEmail;
+    const hideAccountExists = () => {
+      if (existsBox) existsBox.style.display = "none";
+    };
+    const showAccountExists = (address) => {
+      if (!existsBox) return;
+      errorBox.style.display = "none";
+      const text = existsBox.querySelector(".ai-account-exists-text");
+      text.textContent = "";
+      const strong = document.createElement("strong");
+      strong.textContent = "You already have a HirePool account";
+      text.append(strong, address ? ` with ${address}. ` : ". ", "Please sign in instead, or use a different email to create a new account.");
+      existsBox.querySelector(".ai-account-exists-signin").style.display = typeof onSignIn === "function" ? "" : "none";
+      existsBox.style.display = "";
+      existsBox.querySelector(".ai-account-exists-signin").focus?.();
+    };
+    const isAccountExists = (code, status) => code === EMAIL_ALREADY_REGISTERED || status === 409;
+    existsBox?.querySelector(".ai-account-exists-signin")?.addEventListener("click", () => {
+      if (typeof onSignIn === "function") onSignIn({ email: emailInput?.value?.trim() || "" });
+    });
+    existsBox?.querySelector(".ai-account-exists-other")?.addEventListener("click", () => {
+      hideAccountExists();
+      if (emailInput) {
+        emailInput.value = "";
+        emailInput.focus?.();
+      }
+    });
+    emailInput?.addEventListener?.("input", hideAccountExists);
+    if (isAccountExists(initialErrorCode)) {
+      showAccountExists(initialEmail);
+    } else if (typeof initialError === "string" && initialError) {
+      errorBox.textContent = initialError;
+      errorBox.style.display = "block";
+    }
     toggleBtn?.addEventListener("click", () => {
       passwordInput.type = passwordInput.type === "password" ? "text" : "password";
     });
@@ -2381,6 +2442,7 @@ var AssistantSDKBundle = (() => {
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
       errorBox.style.display = "none";
+      hideAccountExists();
       const email = form.email.value.trim();
       const password = form.password.value;
       const confirmPassword = form.confirmPassword.value;
@@ -2410,8 +2472,13 @@ var AssistantSDKBundle = (() => {
       try {
         await onSubmit({ email: emailRes.sanitized, password, confirmPassword });
       } catch (err) {
+        if (!card.isConnected) return;
         submitBtn.disabled = false;
         submitBtn.textContent = "Create Account";
+        if (isAccountExists(err?.code, err?.status)) {
+          showAccountExists(emailRes.sanitized);
+          return;
+        }
         errorBox.textContent = err.message || "Registration failed.";
         errorBox.style.display = "block";
       }
@@ -4822,6 +4889,13 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
           role: data.role || this.hirePoolSignup.selectedRole,
           agreement: data.agreement || this.hirePoolSignup.agreement,
           loadAgreement: (role) => this.apiClient.getSignupAgreement(role),
+          email: data.email || "",
+          error: data.error || null,
+          errorCode: data.errorCode || null,
+          onSignIn: () => {
+            void this.hirePoolSignup.cancel();
+            this._goToLogin();
+          },
           onSubmit: (formData) => this.hirePoolSignup.submitSignup(formData),
           onCancel: () => void this.hirePoolSignup.cancel()
         });
@@ -9754,6 +9828,31 @@ ${tag}` : tag;
 }
 
 .ai-agreement-viewer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+/* Signup card: the email already has an account -> offer Sign in. */
+.ai-account-exists {
+  background: rgba(163, 230, 53, 0.12);
+  border: 1px solid rgba(132, 204, 22, 0.45);
+  border-radius: var(--ai-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+}
+
+.ai-account-exists-text {
+  color: var(--ai-text);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.ai-account-exists-actions {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;

@@ -2432,3 +2432,28 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Signup card: the email already has an account -> offer Sign in. */
+.ai-account-exists {
+  background: rgba(163, 230, 53, 0.12);
+  border: 1px solid rgba(132, 204, 22, 0.45);
+  border-radius: var(--ai-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 4px 0 10px;
+  padding: 10px 12px;
+}
+
+.ai-account-exists-text {
+  color: var(--ai-text);
+  font-size: 13px;
+  line-height: 1.5;
+  margin: 0;
+}
+
+.ai-account-exists-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

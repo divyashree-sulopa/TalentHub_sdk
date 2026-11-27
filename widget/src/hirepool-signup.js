@@ -247,7 +247,14 @@ export class HirePoolSignupCoordinator {
       });
       return result;
     } catch (error) {
-      this.setState(HIREPOOL_SIGNUP_STATES.SIGNUP_FORM, { error: error.message });
+      // The form is drawn again, so hand it what it needs to show the problem (and keep the email).
+      this.setState(HIREPOOL_SIGNUP_STATES.SIGNUP_FORM, {
+        error: error.message,
+        errorCode: error.code || null,
+        email,
+        role: this.selectedRole,
+        agreement: this.agreement
+      });
       throw error;
     }
   }
@@ -707,7 +714,19 @@ function openAgreementViewer(card, { agreement, role, loadAgreement, onAccept })
   return viewer;
 }
 
-export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, loadAgreement = null }) {
+export const EMAIL_ALREADY_REGISTERED = 'EMAIL_ALREADY_REGISTERED';
+
+export function renderSignupFormCard({
+  role,
+  agreement,
+  onSubmit,
+  onCancel,
+  loadAgreement = null,
+  onSignIn = null,
+  email: initialEmail = '',
+  error: initialError = null,
+  errorCode: initialErrorCode = null
+}) {
   const card = document.createElement('div');
   card.className = 'ai-action-card ai-signup-card';
   const roleMeta = ROLE_DEFINITIONS[role] || { label: role, badge: 'HirePool Account' };
@@ -718,7 +737,15 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, load
       <span class="ai-action-title">Sign up as ${escapeHtml(roleMeta.label)}</span>
     </div>
     <p class="ai-action-explanation">Enter your details to create your ${escapeHtml(roleMeta.label)} account. Passwords are encrypted directly and never shared with the AI model.</p>
-    
+
+    <div class="ai-account-exists" role="alert" style="display: none;">
+      <p class="ai-account-exists-text"></p>
+      <div class="ai-account-exists-actions">
+        <button type="button" class="ai-btn-action-confirm ai-account-exists-signin">Sign in</button>
+        <button type="button" class="ai-btn-action-cancel ai-account-exists-other">Use another email</button>
+      </div>
+    </div>
+
     <form class="ai-signup-form" autocomplete="off">
       <div class="ai-form-group">
         <label class="ai-form-label">Email Address *</label>
@@ -754,10 +781,49 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, load
 
   const form = card.querySelector('form');
   const errorBox = card.querySelector('.ai-form-error');
-  const submitBtn = card.querySelector('.ai-btn-action-confirm');
-  const cancelBtn = card.querySelector('.ai-btn-action-cancel');
+  const submitBtn = form.querySelector('.ai-btn-action-confirm');
+  const cancelBtn = form.querySelector('.ai-btn-action-cancel');
   const passwordInput = card.querySelector('input[name="password"]');
   const toggleBtn = card.querySelector('.ai-password-toggle');
+  const existsBox = card.querySelector('.ai-account-exists');
+
+  const emailInput = card.querySelector('input[name="email"]');
+  if (emailInput && typeof initialEmail === 'string' && initialEmail) emailInput.value = initialEmail;
+
+  const hideAccountExists = () => { if (existsBox) existsBox.style.display = 'none'; };
+  // The email already has a HirePool account: say so and offer Sign in instead of a bare error.
+  const showAccountExists = (address) => {
+    if (!existsBox) return;
+    errorBox.style.display = 'none';
+    const text = existsBox.querySelector('.ai-account-exists-text');
+    text.textContent = '';
+    const strong = document.createElement('strong');
+    strong.textContent = 'You already have a HirePool account';
+    text.append(strong, address ? ` with ${address}. ` : '. ', 'Please sign in instead, or use a different email to create a new account.');
+    existsBox.querySelector('.ai-account-exists-signin').style.display = typeof onSignIn === 'function' ? '' : 'none';
+    existsBox.style.display = '';
+    existsBox.querySelector('.ai-account-exists-signin').focus?.();
+  };
+  const isAccountExists = (code, status) => code === EMAIL_ALREADY_REGISTERED || status === 409;
+
+  existsBox?.querySelector('.ai-account-exists-signin')?.addEventListener('click', () => {
+    if (typeof onSignIn === 'function') onSignIn({ email: emailInput?.value?.trim() || '' });
+  });
+  existsBox?.querySelector('.ai-account-exists-other')?.addEventListener('click', () => {
+    hideAccountExists();
+    if (emailInput) {
+      emailInput.value = '';
+      emailInput.focus?.();
+    }
+  });
+  emailInput?.addEventListener?.('input', hideAccountExists);
+
+  if (isAccountExists(initialErrorCode)) {
+    showAccountExists(initialEmail);
+  } else if (typeof initialError === 'string' && initialError) {
+    errorBox.textContent = initialError;
+    errorBox.style.display = 'block';
+  }
 
   toggleBtn?.addEventListener('click', () => {
     passwordInput.type = passwordInput.type === 'password' ? 'text' : 'password';
@@ -784,6 +850,7 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, load
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     errorBox.style.display = 'none';
+    hideAccountExists();
 
     const email = form.email.value.trim();
     const password = form.password.value;
@@ -818,8 +885,13 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, load
     try {
       await onSubmit({ email: emailRes.sanitized, password, confirmPassword });
     } catch (err) {
+      if (!card.isConnected) return; // a fresh form (with the message) has replaced this one
       submitBtn.disabled = false;
       submitBtn.textContent = 'Create Account';
+      if (isAccountExists(err?.code, err?.status)) {
+        showAccountExists(emailRes.sanitized);
+        return;
+      }
       errorBox.textContent = err.message || 'Registration failed.';
       errorBox.style.display = 'block';
     }
