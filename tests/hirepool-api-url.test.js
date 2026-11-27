@@ -120,10 +120,12 @@ test('signup calls the configured API and accepts a configured website origin', 
   }
 });
 
-test('signup User Agreement link uses the configured app address (localhost only as fallback)', async () => {
-  const { getAgreementPageUrl } = await import('../widget/src/hirepool-signup.js');
-  assert.equal(getAgreementPageUrl('candidate', 'https://app.hirepool.ai'), 'https://app.hirepool.ai/agreements?role=candidate');
-  assert.equal(getAgreementPageUrl('client', 'https://app.hirepool.ai/login'), 'https://app.hirepool.ai/agreements?role=client');
-  assert.equal(getAgreementPageUrl('consultancy'), 'http://localhost:5173/agreements?role=consultancy');
-  assert.equal(getAgreementPageUrl('candidate', 'javascript:alert(1)'), 'http://localhost:5173/agreements?role=candidate');
+test('signup User Agreement label shows the version even when the API sends a number', async () => {
+  const { getAgreementLinkLabel, formatAgreementVersion } = await import('../widget/src/hirepool-signup.js');
+  assert.equal(getAgreementLinkLabel({ version: 1 }), 'HirePool User Agreement (v1)');
+  assert.equal(getAgreementLinkLabel({ version: '1.2' }), 'HirePool User Agreement (v1.2)');
+  assert.equal(getAgreementLinkLabel({ version: 0 }), 'HirePool User Agreement (v0)');
+  assert.equal(getAgreementLinkLabel({}), 'HirePool User Agreement');
+  assert.equal(getAgreementLinkLabel(null), 'HirePool User Agreement');
+  assert.equal(formatAgreementVersion('   '), '');
 });

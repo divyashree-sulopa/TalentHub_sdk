@@ -2218,7 +2218,7 @@ export class AssistantWidgetUI {
       card = renderSignupFormCard({
         role: data.role || this.hirePoolSignup.selectedRole,
         agreement: data.agreement || this.hirePoolSignup.agreement,
-        appOrigin: this._getApprovedAppOrigins()[0] || null,
+        loadAgreement: (role) => this.apiClient.getSignupAgreement(role),
         onSubmit: (formData) => this.hirePoolSignup.submitSignup(formData),
         onCancel: () => void this.hirePoolSignup.cancel()
       });

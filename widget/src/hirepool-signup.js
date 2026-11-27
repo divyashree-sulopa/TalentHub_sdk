@@ -607,17 +607,104 @@ export function renderRoleSelectionCard({ onSelect, onCancel }) {
   return card;
 }
 
-/** The HirePool app's User Agreement page (configured app address; local app by default). */
-export function getAgreementPageUrl(role, appOrigin = null) {
-  let base = 'http://localhost:5173';
-  try {
-    const url = new URL(appOrigin);
-    if (url.protocol === 'https:' || url.protocol === 'http:') base = url.origin;
-  } catch {}
-  return `${base}/agreements?role=${encodeURIComponent(role || '')}`;
+/** The agreement version as text ("1", "1.2"), or '' when there is none. The API may send a number. */
+export function formatAgreementVersion(version) {
+  if (version === null || version === undefined) return '';
+  const text = String(version).trim();
+  return text.length > 0 && text.length <= 20 ? text : '';
 }
 
-export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, appOrigin = null }) {
+/** Link text for the agreement: "HirePool User Agreement (v1)" or, without a version, "HirePool User Agreement". */
+export function getAgreementLinkLabel(agreement) {
+  const version = formatAgreementVersion(agreement?.version);
+  return version ? `HirePool User Agreement (v${version})` : 'HirePool User Agreement';
+}
+
+function formatAgreementDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  return date.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+}
+
+/**
+ * Shows the User Agreement inside the signup card (the HirePool app has no public agreement page,
+ * so a link would land on the login screen). The text is shown as plain text, never as HTML.
+ */
+function openAgreementViewer(card, { agreement, role, loadAgreement, onAccept }) {
+  card.querySelector('.ai-agreement-viewer')?.remove();
+  const form = card.querySelector('.ai-signup-form');
+  const viewer = document.createElement('div');
+  viewer.className = 'ai-agreement-viewer';
+  viewer.setAttribute('role', 'dialog');
+  viewer.setAttribute('aria-label', 'HirePool User Agreement');
+  viewer.innerHTML = `
+    <div class="ai-agreement-viewer-head">
+      <span class="ai-agreement-viewer-title">HirePool User Agreement</span>
+      <button type="button" class="ai-agreement-viewer-x" aria-label="Close agreement">×</button>
+    </div>
+    <div class="ai-agreement-viewer-meta"></div>
+    <div class="ai-agreement-viewer-body" tabindex="0">Loading the agreement…</div>
+    <div class="ai-agreement-viewer-actions">
+      <button type="button" class="ai-btn-action-confirm ai-agreement-viewer-accept">I agree</button>
+      <button type="button" class="ai-btn-action-cancel ai-agreement-viewer-close">Close</button>
+    </div>
+  `;
+  const body = viewer.querySelector('.ai-agreement-viewer-body');
+  const meta = viewer.querySelector('.ai-agreement-viewer-meta');
+  const acceptBtn = viewer.querySelector('.ai-agreement-viewer-accept');
+
+  const close = () => {
+    viewer.remove();
+    if (form) form.style.display = '';
+    card.querySelector('.ai-agreement-open')?.focus();
+  };
+  const show = (doc) => {
+    const content = typeof doc?.content === 'string' ? doc.content.trim() : '';
+    if (!content) {
+      body.textContent = "Couldn't load the agreement. Please try again in a moment.";
+      body.classList.add('ai-agreement-viewer-error');
+      acceptBtn.style.display = 'none';
+      meta.textContent = '';
+      return;
+    }
+    body.classList.remove('ai-agreement-viewer-error');
+    body.textContent = content;
+    acceptBtn.style.display = '';
+    const parts = [];
+    const version = formatAgreementVersion(doc.version);
+    if (version) parts.push(`Version ${version}`);
+    const date = formatAgreementDate(doc.effectiveDate || doc.effective_date);
+    if (date) parts.push(`Effective ${date}`);
+    meta.textContent = parts.join(' · ');
+    meta.style.display = parts.length ? '' : 'none';
+  };
+
+  viewer.querySelector('.ai-agreement-viewer-x').addEventListener('click', close);
+  viewer.querySelector('.ai-agreement-viewer-close').addEventListener('click', close);
+  acceptBtn.addEventListener('click', () => {
+    if (onAccept) onAccept();
+    close();
+  });
+
+  if (form) form.style.display = 'none';
+  card.appendChild(viewer);
+
+  if (typeof agreement?.content === 'string' && agreement.content.trim()) {
+    show(agreement);
+  } else if (typeof loadAgreement === 'function') {
+    Promise.resolve()
+      .then(() => loadAgreement(role))
+      .then(doc => { if (viewer.isConnected) show(doc); })
+      .catch(() => { if (viewer.isConnected) show(null); });
+  } else {
+    show(null);
+  }
+  viewer.querySelector('.ai-agreement-viewer-x').focus();
+  return viewer;
+}
+
+export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, loadAgreement = null }) {
   const card = document.createElement('div');
   card.className = 'ai-action-card ai-signup-card';
   const roleMeta = ROLE_DEFINITIONS[role] || { label: role, badge: 'HirePool Account' };
@@ -649,7 +736,7 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, appO
       <div class="ai-form-group ai-agreement-group">
         <label class="ai-action-acknowledgement" style="font-size: 13px;">
           <input type="checkbox" name="acceptAgreement" required>
-          I agree to the <a href="${escapeHtml(getAgreementPageUrl(role, appOrigin))}" target="_blank" rel="noopener noreferrer" style="color: #16a34a; text-decoration: underline;">HirePool User Agreement (v${escapeHtml(agreement?.version || '1.0')})</a>.
+          <span>I agree to the <button type="button" class="ai-agreement-open">${escapeHtml(getAgreementLinkLabel(agreement))}</button>.</span>
         </label>
       </div>
 
@@ -671,6 +758,24 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, appO
 
   toggleBtn?.addEventListener('click', () => {
     passwordInput.type = passwordInput.type === 'password' ? 'text' : 'password';
+  });
+
+  let currentAgreement = agreement;
+  card.querySelector('.ai-agreement-open')?.addEventListener('click', (e) => {
+    // Inside the <label>: don't let the click tick the box.
+    e.preventDefault();
+    e.stopPropagation();
+    openAgreementViewer(card, {
+      agreement: currentAgreement,
+      role,
+      loadAgreement: typeof loadAgreement === 'function'
+        ? async (r) => { currentAgreement = await loadAgreement(r); return currentAgreement; }
+        : null,
+      onAccept: () => {
+        form.acceptAgreement.checked = true;
+        if (errorBox.textContent.includes('Agreement')) errorBox.style.display = 'none';
+      }
+    });
   });
 
   form.addEventListener('submit', async (e) => {

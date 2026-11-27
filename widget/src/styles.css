@@ -2345,3 +2345,90 @@
   background: rgba(163, 230, 53, 0.22);
   color: #3f6212;
 }
+
+/* Signup card: User Agreement opens inside the card (no public agreement page in the app). */
+.ai-signup-card .ai-agreement-group .ai-action-acknowledgement {
+  font-size: 13px;
+}
+
+.ai-agreement-open {
+  background: none;
+  border: 0;
+  color: #16a34a;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+}
+
+.ai-agreement-open:hover,
+.ai-agreement-open:focus-visible {
+  color: #15803d;
+}
+
+.ai-agreement-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ai-agreement-viewer-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-agreement-viewer-title {
+  color: var(--ai-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.ai-agreement-viewer-x {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ai-text-muted);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.ai-agreement-viewer-x:hover {
+  background: var(--ai-surface-alt);
+  color: var(--ai-text);
+}
+
+.ai-agreement-viewer-meta {
+  color: var(--ai-text-muted);
+  font-size: 11px;
+}
+
+.ai-agreement-viewer-body {
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: var(--ai-radius-sm);
+  color: var(--ai-text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-agreement-viewer-body.ai-agreement-viewer-error {
+  color: #dc2626;
+}
+
+.ai-agreement-viewer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}

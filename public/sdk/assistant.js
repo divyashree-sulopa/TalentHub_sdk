@@ -2222,16 +2222,91 @@ var AssistantSDKBundle = (() => {
     });
     return card;
   }
-  function getAgreementPageUrl(role, appOrigin = null) {
-    let base = "http://localhost:5173";
-    try {
-      const url = new URL(appOrigin);
-      if (url.protocol === "https:" || url.protocol === "http:") base = url.origin;
-    } catch {
-    }
-    return `${base}/agreements?role=${encodeURIComponent(role || "")}`;
+  function formatAgreementVersion(version) {
+    if (version === null || version === void 0) return "";
+    const text = String(version).trim();
+    return text.length > 0 && text.length <= 20 ? text : "";
   }
-  function renderSignupFormCard({ role, agreement, onSubmit, onCancel, appOrigin = null }) {
+  function getAgreementLinkLabel(agreement) {
+    const version = formatAgreementVersion(agreement?.version);
+    return version ? `HirePool User Agreement (v${version})` : "HirePool User Agreement";
+  }
+  function formatAgreementDate(value) {
+    if (!value) return "";
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    return date.toLocaleDateString(void 0, { year: "numeric", month: "short", day: "numeric" });
+  }
+  function openAgreementViewer(card, { agreement, role, loadAgreement, onAccept }) {
+    card.querySelector(".ai-agreement-viewer")?.remove();
+    const form = card.querySelector(".ai-signup-form");
+    const viewer = document.createElement("div");
+    viewer.className = "ai-agreement-viewer";
+    viewer.setAttribute("role", "dialog");
+    viewer.setAttribute("aria-label", "HirePool User Agreement");
+    viewer.innerHTML = `
+    <div class="ai-agreement-viewer-head">
+      <span class="ai-agreement-viewer-title">HirePool User Agreement</span>
+      <button type="button" class="ai-agreement-viewer-x" aria-label="Close agreement">\xD7</button>
+    </div>
+    <div class="ai-agreement-viewer-meta"></div>
+    <div class="ai-agreement-viewer-body" tabindex="0">Loading the agreement\u2026</div>
+    <div class="ai-agreement-viewer-actions">
+      <button type="button" class="ai-btn-action-confirm ai-agreement-viewer-accept">I agree</button>
+      <button type="button" class="ai-btn-action-cancel ai-agreement-viewer-close">Close</button>
+    </div>
+  `;
+    const body = viewer.querySelector(".ai-agreement-viewer-body");
+    const meta = viewer.querySelector(".ai-agreement-viewer-meta");
+    const acceptBtn = viewer.querySelector(".ai-agreement-viewer-accept");
+    const close = () => {
+      viewer.remove();
+      if (form) form.style.display = "";
+      card.querySelector(".ai-agreement-open")?.focus();
+    };
+    const show = (doc) => {
+      const content = typeof doc?.content === "string" ? doc.content.trim() : "";
+      if (!content) {
+        body.textContent = "Couldn't load the agreement. Please try again in a moment.";
+        body.classList.add("ai-agreement-viewer-error");
+        acceptBtn.style.display = "none";
+        meta.textContent = "";
+        return;
+      }
+      body.classList.remove("ai-agreement-viewer-error");
+      body.textContent = content;
+      acceptBtn.style.display = "";
+      const parts = [];
+      const version = formatAgreementVersion(doc.version);
+      if (version) parts.push(`Version ${version}`);
+      const date = formatAgreementDate(doc.effectiveDate || doc.effective_date);
+      if (date) parts.push(`Effective ${date}`);
+      meta.textContent = parts.join(" \xB7 ");
+      meta.style.display = parts.length ? "" : "none";
+    };
+    viewer.querySelector(".ai-agreement-viewer-x").addEventListener("click", close);
+    viewer.querySelector(".ai-agreement-viewer-close").addEventListener("click", close);
+    acceptBtn.addEventListener("click", () => {
+      if (onAccept) onAccept();
+      close();
+    });
+    if (form) form.style.display = "none";
+    card.appendChild(viewer);
+    if (typeof agreement?.content === "string" && agreement.content.trim()) {
+      show(agreement);
+    } else if (typeof loadAgreement === "function") {
+      Promise.resolve().then(() => loadAgreement(role)).then((doc) => {
+        if (viewer.isConnected) show(doc);
+      }).catch(() => {
+        if (viewer.isConnected) show(null);
+      });
+    } else {
+      show(null);
+    }
+    viewer.querySelector(".ai-agreement-viewer-x").focus();
+    return viewer;
+  }
+  function renderSignupFormCard({ role, agreement, onSubmit, onCancel, loadAgreement = null }) {
     const card = document.createElement("div");
     card.className = "ai-action-card ai-signup-card";
     const roleMeta = ROLE_DEFINITIONS[role] || { label: role, badge: "HirePool Account" };
@@ -2262,7 +2337,7 @@ var AssistantSDKBundle = (() => {
       <div class="ai-form-group ai-agreement-group">
         <label class="ai-action-acknowledgement" style="font-size: 13px;">
           <input type="checkbox" name="acceptAgreement" required>
-          I agree to the <a href="${escapeHtml2(getAgreementPageUrl(role, appOrigin))}" target="_blank" rel="noopener noreferrer" style="color: #16a34a; text-decoration: underline;">HirePool User Agreement (v${escapeHtml2(agreement?.version || "1.0")})</a>.
+          <span>I agree to the <button type="button" class="ai-agreement-open">${escapeHtml2(getAgreementLinkLabel(agreement))}</button>.</span>
         </label>
       </div>
 
@@ -2282,6 +2357,23 @@ var AssistantSDKBundle = (() => {
     const toggleBtn = card.querySelector(".ai-password-toggle");
     toggleBtn?.addEventListener("click", () => {
       passwordInput.type = passwordInput.type === "password" ? "text" : "password";
+    });
+    let currentAgreement = agreement;
+    card.querySelector(".ai-agreement-open")?.addEventListener("click", (e) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openAgreementViewer(card, {
+        agreement: currentAgreement,
+        role,
+        loadAgreement: typeof loadAgreement === "function" ? async (r) => {
+          currentAgreement = await loadAgreement(r);
+          return currentAgreement;
+        } : null,
+        onAccept: () => {
+          form.acceptAgreement.checked = true;
+          if (errorBox.textContent.includes("Agreement")) errorBox.style.display = "none";
+        }
+      });
     });
     form.addEventListener("submit", async (e) => {
       e.preventDefault();
@@ -4726,7 +4818,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
         card = renderSignupFormCard({
           role: data.role || this.hirePoolSignup.selectedRole,
           agreement: data.agreement || this.hirePoolSignup.agreement,
-          appOrigin: this._getApprovedAppOrigins()[0] || null,
+          loadAgreement: (role) => this.apiClient.getSignupAgreement(role),
           onSubmit: (formData) => this.hirePoolSignup.submitSignup(formData),
           onCancel: () => void this.hirePoolSignup.cancel()
         });
@@ -9575,6 +9667,93 @@ ${tag}` : tag;
 .ai-theme-hirepool .ai-action-risk.risk-write {
   background: rgba(163, 230, 53, 0.22);
   color: #3f6212;
+}
+
+/* Signup card: User Agreement opens inside the card (no public agreement page in the app). */
+.ai-signup-card .ai-agreement-group .ai-action-acknowledgement {
+  font-size: 13px;
+}
+
+.ai-agreement-open {
+  background: none;
+  border: 0;
+  color: #16a34a;
+  cursor: pointer;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+}
+
+.ai-agreement-open:hover,
+.ai-agreement-open:focus-visible {
+  color: #15803d;
+}
+
+.ai-agreement-viewer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.ai-agreement-viewer-head {
+  align-items: center;
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.ai-agreement-viewer-title {
+  color: var(--ai-text);
+  font-size: 14px;
+  font-weight: 700;
+}
+
+.ai-agreement-viewer-x {
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  color: var(--ai-text-muted);
+  cursor: pointer;
+  font-size: 20px;
+  line-height: 1;
+  padding: 2px 6px;
+}
+
+.ai-agreement-viewer-x:hover {
+  background: var(--ai-surface-alt);
+  color: var(--ai-text);
+}
+
+.ai-agreement-viewer-meta {
+  color: var(--ai-text-muted);
+  font-size: 11px;
+}
+
+.ai-agreement-viewer-body {
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: var(--ai-radius-sm);
+  color: var(--ai-text);
+  font-size: 12.5px;
+  line-height: 1.55;
+  max-height: 260px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 10px 12px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.ai-agreement-viewer-body.ai-agreement-viewer-error {
+  color: #dc2626;
+}
+
+.ai-agreement-viewer-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 `;
 
