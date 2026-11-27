@@ -979,9 +979,14 @@ function getHirePoolAppPageUrl(path) {
   return new URL(path, getHirePoolAppLoginUrl()).href;
 }
 
+/** A link on a line of its own; the widget shows it as a button. */
+function appPageButton(label, path) {
+  return `[${label}](${getHirePoolAppPageUrl(path)})`;
+}
+
 export function formatClientApplicationsList(applications) {
   if (!Array.isArray(applications) || applications.length === 0) {
-    return `No candidate applications have been received yet for your posted jobs.\n\nYou can review your active jobs or check the applications portal directly at: ${getHirePoolAppPageUrl('/client/applications')}`;
+    return `No candidate applications have been received yet for your posted jobs.\n\n${appPageButton('View applications', '/client/applications')}`;
   }
   const lines = [
     '## Candidate Applications for Your Jobs\n',
@@ -1009,7 +1014,7 @@ export function formatClientApplicationsList(applications) {
     }
     lines.push('');
   }
-  lines.push(`You can review and manage candidate applications at [Review Applications](${getHirePoolAppPageUrl('/client/applications')}).`);
+  lines.push('', appPageButton('Review applications', '/client/applications'));
   return lines.join('\n');
 }
 
@@ -1035,7 +1040,6 @@ export function formatClientDashboardStats(stats) {
     '### Awaiting Your Action',
     `- **Shortlisted Candidates:** ${shortlisted}`,
     `- **Ready for Interviews:** ${shortlisted}`,
-    `- **Review Applications Portal:** [Review Applications](${getHirePoolAppPageUrl('/client/applications')})`,
     '',
     '### Hiring Pipeline',
     `- **Applied:** ${totalApps}`,
@@ -1056,6 +1060,7 @@ export function formatClientDashboardStats(stats) {
     }
   }
 
+  lines.push('', appPageButton('Review applications', '/client/applications'));
   return lines.join('\n');
 }
 

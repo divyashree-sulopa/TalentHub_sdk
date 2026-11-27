@@ -117,3 +117,15 @@ test('markdown: underscores inside words stay as they are; real emphasis still w
   assert.equal(parseMarkdown('Say *hello* or _hi_ to **me**'), '<p>Say <em>hello</em> or <em>hi</em> to <strong>me</strong></p>');
   assert.equal(parseMarkdown('Intro\n- a\n- b\nAfter'), '<p>Intro</p><ul><li>a</li><li>b</li></ul><p>After</p>');
 });
+
+test('company bot: "View applications" is a button, not a bare address', async () => {
+  const { formatClientApplicationsList, formatClientDashboardStats } = await import('../backend/src/routes/chat.js');
+  const none = formatClientApplicationsList([]);
+  assert.doesNotMatch(none, /directly at/);
+  assert.match(none, /\n\n\[View applications\]\(http:\/\/localhost:5173\/client\/applications\)$/);
+  const html = parseMarkdown(none);
+  assert.match(html, /<a class="ai-link-btn" href="http:\/\/localhost:5173\/client\/applications"[^>]*>View applications<\/a>/);
+  assert.match(formatClientDashboardStats({ total_jobs: 1 }), /\n\n\[Review applications\]\(/);
+  // A link inside a sentence stays an ordinary link.
+  assert.doesNotMatch(parseMarkdown('Please [log in](https://app.hirepool.ai/login) again.'), /ai-link-btn/);
+});

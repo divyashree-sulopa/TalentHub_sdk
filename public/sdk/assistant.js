@@ -63,6 +63,9 @@ var AssistantSDKBundle = (() => {
     const formatted = paragraphs.map((p) => {
       const trimmed = p.trim();
       if (!trimmed) return "";
+      if (/^<a href="https?:\/\/[^"]+" target="_blank" rel="noopener noreferrer">[^<]+<\/a>$/.test(trimmed)) {
+        return `<div class="ai-link-btn-row">${trimmed.replace("<a ", '<a class="ai-link-btn" ')}</div>`;
+      }
       if (/^<(h[1-4]|div|pre|ul|ol|blockquote)/i.test(trimmed)) {
         return trimmed;
       }
@@ -3235,6 +3238,18 @@ var AssistantSDKBundle = (() => {
     _attachEvents() {
       this.launcherBtn.addEventListener("click", () => {
         this.toggle();
+      });
+      this.messagesList?.addEventListener("click", (event) => {
+        const link = event.target?.closest?.("a.ai-link-btn");
+        if (!link || typeof window === "undefined") return;
+        try {
+          const url = new URL(link.href);
+          if (url.origin !== window.location.origin || !/^https?:$/.test(url.protocol)) return;
+          event.preventDefault();
+          this.events.emit("link:open", { url: url.href });
+          window.location.assign(url.href);
+        } catch {
+        }
       });
       this.panel.querySelectorAll("[data-auth]").forEach((button) => {
         button.addEventListener("click", () => {
@@ -10198,6 +10213,34 @@ ${tag}` : tag;
   .ai-ef-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* A link on its own line ("View applications") is a button. */
+.ai-link-btn-row {
+  margin-top: 10px;
+}
+
+.ai-link-btn {
+  align-items: center;
+  background: var(--ai-primary);
+  border-radius: 999px;
+  color: var(--ai-primary-contrast) !important;
+  display: inline-flex;
+  font-size: 13px;
+  font-weight: 600;
+  gap: 6px;
+  padding: 7px 16px;
+  text-decoration: none !important;
+  transition: background 0.15s ease;
+}
+
+.ai-link-btn::after {
+  content: "\u2192";
+}
+
+.ai-link-btn:hover,
+.ai-link-btn:focus-visible {
+  background: var(--ai-primary-hover);
 }
 `;
 

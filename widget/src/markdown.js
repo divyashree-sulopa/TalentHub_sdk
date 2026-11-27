@@ -75,6 +75,10 @@ export function parseMarkdown(text) {
   const formatted = paragraphs.map(p => {
     const trimmed = p.trim();
     if (!trimmed) return '';
+    // A link on a line of its own ("[View applications](https://…)") is shown as a button.
+    if (/^<a href="https?:\/\/[^"]+" target="_blank" rel="noopener noreferrer">[^<]+<\/a>$/.test(trimmed)) {
+      return `<div class="ai-link-btn-row">${trimmed.replace('<a ', '<a class="ai-link-btn" ')}</div>`;
+    }
     // Don't wrap in <p> if it starts with block element
     if (/^<(h[1-4]|div|pre|ul|ol|blockquote)/i.test(trimmed)) {
       return trimmed;

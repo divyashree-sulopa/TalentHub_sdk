@@ -333,6 +333,20 @@ export class AssistantWidgetUI {
       this.toggle();
     });
 
+    // Link buttons ("View applications"): a page of the app the user is already in
+    // opens right here instead of in a new tab.
+    this.messagesList?.addEventListener('click', event => {
+      const link = event.target?.closest?.('a.ai-link-btn');
+      if (!link || typeof window === 'undefined') return;
+      try {
+        const url = new URL(link.href);
+        if (url.origin !== window.location.origin || !/^https?:$/.test(url.protocol)) return;
+        event.preventDefault();
+        this.events.emit('link:open', { url: url.href });
+        window.location.assign(url.href);
+      } catch {}
+    });
+
     // Website: Sign in / Sign up buttons (bar before the chat starts, header pills after).
     this.panel.querySelectorAll('[data-auth]').forEach(button => {
       button.addEventListener('click', () => {

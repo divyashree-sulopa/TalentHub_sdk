@@ -128,7 +128,7 @@ test('Employer Workflow 3: formatClientDashboardStats formats Overview, Awaiting
   assert.match(formatted, /- \*\*Pending Review:\*\* 12/);
   assert.match(formatted, /### Awaiting Your Action/);
   assert.match(formatted, /- \*\*Shortlisted Candidates:\*\* 6/);
-  assert.match(formatted, /\[Review Applications\]\(http:\/\/localhost:5173\/client\/applications\)/);
+  assert.match(formatted, /\n\n\[Review applications\]\(http:\/\/localhost:5173\/client\/applications\)$/);
   assert.match(formatted, /### Hiring Pipeline/);
   assert.match(formatted, /- \*\*Applied:\*\* 42/);
   assert.match(formatted, /- \*\*In Review:\*\* 12/);
