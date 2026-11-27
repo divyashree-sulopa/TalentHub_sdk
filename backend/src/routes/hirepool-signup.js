@@ -166,8 +166,11 @@ export function createHirePoolSignupRouter({
         id: agreement.id,
         role: agreement.role,
         version: agreement.version,
-        effectiveDate: agreement.effective_date,
-        content: agreement.content
+        title: typeof agreement.title === 'string' ? agreement.title : null,
+        effectiveDate: agreement.effective_date || null,
+        // The HirePool API sends the agreement text as `body`.
+        content: typeof agreement.body === 'string' ? agreement.body
+          : (typeof agreement.content === 'string' ? agreement.content : null)
       });
     } catch (err) {
       return res.status(err.statusCode || 500).json({

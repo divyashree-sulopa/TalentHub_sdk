@@ -103,13 +103,17 @@ test('signup calls the configured API and accepts a configured website origin', 
     const calls = [];
     const fetchImpl = async (url, init) => {
       calls.push({ url: String(url), headers: init?.headers || {} });
-      return new Response(JSON.stringify({ id: 'agr-1', version: '1', content: 'Terms', role: 'candidate' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      // Same shape as the HirePool API (AgreementResponse): the text is in `body`.
+      return new Response(JSON.stringify({ id: 'agr-1', version: 3, title: 'Hirepool User Agreement', body: '1. Keep Information Confidential', role: 'candidate' }), { status: 200, headers: { 'Content-Type': 'application/json' } });
     };
     const app = express();
     app.use(express.json());
     app.use('/signup', createHirePoolSignupRouter({ fetchImpl }));
     const res = await request(app).get('/signup/agreement?role=candidate').set('Origin', 'https://hirepool.ai');
     assert.equal(res.status, 200, JSON.stringify(res.body));
+    assert.equal(res.body.content, '1. Keep Information Confidential', 'agreement text is passed on to the widget');
+    assert.equal(res.body.title, 'Hirepool User Agreement');
+    assert.equal(res.body.version, 3);
     assert.equal(calls[0].url, 'https://api.hirepool.ai/api/v1/agreements/current?role=candidate');
     assert.equal(calls[0].headers.Host, undefined, 'no localhost Host header for the real API');
     const other = await request(app).get('/signup/agreement?role=candidate').set('Origin', 'https://evil.example.test');

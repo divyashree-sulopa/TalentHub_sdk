@@ -2275,6 +2275,9 @@ var AssistantSDKBundle = (() => {
       }
       body.classList.remove("ai-agreement-viewer-error");
       body.textContent = content;
+      if (typeof doc.title === "string" && doc.title.trim()) {
+        viewer.querySelector(".ai-agreement-viewer-title").textContent = doc.title.trim();
+      }
       acceptBtn.style.display = "";
       const parts = [];
       const version = formatAgreementVersion(doc.version);
