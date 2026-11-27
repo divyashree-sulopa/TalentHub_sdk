@@ -1814,6 +1814,14 @@ function resolveHirePoolVerifiedReadIntent(message, authUser, registry) {
  * "job opportunities", "show open jobs", "any openings?" — a request for the
  * general job list rather than a search for something specific.
  */
+/** The visitor really asked to see jobs ("any openings?", "find me a React job"), not just "yes". */
+export function isExplicitJobSearchRequest(text) {
+  const message = String(text || '');
+  if (!message.trim() || isShortAffirmative(message)) return false;
+  return /(?:jobs?|openings?|vacanc(?:y|ies)|positions?|roles?|internships?|works+froms+home|hirings+now|apply)/i.test(message) &&
+    !/(?:post|create|publish|list|add)s+(?:as+|mys+|ours+)?(?:jobs?|openings?|roles?|positions?)/i.test(message);
+}
+
 export function isGenericJobListRequest(text) {
   const value = String(text || '').trim().replace(/[.!?]+$/, '');
   return /^(?:(?:please\s+)?(?:show|view|list|get|see|check|find|display|give\s+me)\s+)?(?:me\s+)?(?:(?:all|the|my|our|any|open|available|current|latest|new|active)\s+)*(?:job\s+)?(?:op+[a-z]{0,2}rtunit(?:y|ies)|openings?|vacanc(?:y|ies)|jobs?(?:\s+(?:list|openings|available))?)(?:\s+(?:available|for\s+(?:me|us|my\s+candidates)|on\s+hirepool))?$/i.test(value) ||
@@ -2263,6 +2271,11 @@ async function evaluateHirePoolTurn({
     const guestResponse = getUnverifiedHirePoolResponse(message, session, activeRegistry, signupContext, surface);
     if (guestResponse) {
       recordGuestResponse(session, message, guestResponse, addMessageOptions);
+      // "Would you like to sign up for an Employer / Company account?" -> a plain "yes"
+      // next must start that signup (not go to the AI, which may answer with a job search).
+      if (!guestResponse.action) {
+        session.hirePoolSignupOffer = detectGuestSignupOffer(guestResponse.text, { session, surface, verifiedHirePoolUser });
+      }
       return {
         handled: true,
         text: guestResponse.text,
@@ -2652,7 +2665,8 @@ async function processActionOrToolCalls({
   authUser,
   conversationId,
   incomingMessage,
-  candidateWorkflow
+  candidateWorkflow,
+  visitorRole = null
 }) {
   let hostAction = null;
   let connectorResult = null;
@@ -2739,6 +2753,20 @@ async function processActionOrToolCalls({
       // Website bot: public HirePool job search. Results are formatted by the
       // server below, never by the model, so job details cannot be invented.
       if (actionDef?.metadata?.hirePoolPublicJobs) {
+        // A visitor who is hiring (company / agency) is not looking for a job: don't answer
+        // them with a job search unless they really asked for jobs.
+        if (['client', 'consultancy'].includes(visitorRole) && !isExplicitJobSearchRequest(incomingMessage)) {
+          toolResults.push({
+            tool_call_id: tc.id,
+            role: 'tool',
+            name: tc.rawName || tc.name,
+            content: JSON.stringify({
+              skipped: true,
+              reason: `This visitor is hiring as a ${visitorRole === 'client' ? 'company' : 'staffing agency / consultancy'}, not looking for a job. Do not search jobs. Help them with hiring on HirePool and offer to create their ${visitorRole === 'client' ? 'Employer / Company' : 'Consultancy'} account.`
+            })
+          });
+          continue;
+        }
         const searchArguments = actionDef.parameterSchema.parse(tc.arguments || {});
         try {
           publicJobSearch = { result: await searchPublicHirePoolJobs(searchArguments) };
@@ -3040,7 +3068,8 @@ async function processActionOrToolCalls({
         ? formatPublicJobSearchUnavailable()
         : formatPublicJobResults(publicJobSearch.result);
       const signupAction = activeRegistry.get('hirepool_signup');
-      if (signupAction && !hostAction) {
+      // Only job seekers get the candidate signup card with job results.
+      if (signupAction && !hostAction && !['client', 'consultancy'].includes(visitorRole)) {
         hostAction = {
           id: `hirepool_signup-${conversationId || 'guest'}`,
           action: signupAction.name,
@@ -3932,7 +3961,8 @@ chatRouter.post('/', async (req, res, next) => {
       authUser,
       conversationId: session.id,
       incomingMessage: message,
-      candidateWorkflow: session.hirePoolWorkflow
+      candidateWorkflow: session.hirePoolWorkflow,
+      visitorRole: verifiedHirePoolUser ? null : (session?.hirePoolVisitor?.selectedRole || null)
     });
     const finalText = assistantId === 'hirepool'
       ? recoverHirePoolInScopeFalseRefusal(rawFinalText, message, earlyTurn.domainClassification)
@@ -4155,7 +4185,8 @@ chatRouter.post('/stream', async (req, res, next) => {
       authUser,
       conversationId: session.id,
       incomingMessage: message,
-      candidateWorkflow: session.hirePoolWorkflow
+      candidateWorkflow: session.hirePoolWorkflow,
+      visitorRole: verifiedHirePoolUser ? null : (session?.hirePoolVisitor?.selectedRole || null)
     });
     const finalText = assistantId === 'hirepool'
       ? recoverHirePoolInScopeFalseRefusal(rawFinalText, message, earlyTurn.domainClassification)

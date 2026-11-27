@@ -240,3 +240,59 @@ test('"any" / "anywhere" as a location means no location filter (no "in any." in
   assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { locations: 'any' } }), { query: {} });
   assert.deepEqual(normalizeHirePoolJobSearchArguments({ query: { query: 'react developer', locations: 'Pune' } }), { query: { query: 'react developer', locations: 'Pune' } });
 });
+
+test('website: a visitor hiring for their company who says "yes" gets company signup, never a job search or candidate card', async (t) => {
+  process.env.NODE_ENV = 'development';
+  delete process.env.VERCEL_ENV;
+  process.env.ENABLE_HIREPOOL_LOCAL_BRIDGE = 'true';
+  process.env.DYNAMIC_API_DISCOVERY_ENABLED = 'true';
+  process.env.API_DISCOVERY_ALLOWED_HOSTS = 'localhost';
+  process.env.HIREPOOL_LOCAL_ALLOWED_ORIGINS = 'http://localhost:3000';
+  process.env.CORS_ALLOWED_ORIGINS = 'http://localhost:3000';
+  sessionManager.sessions.clear();
+
+  const realFetch = globalThis.fetch;
+  t.after(() => { globalThis.fetch = realFetch; });
+  let jobSearches = 0;
+  globalThis.fetch = async (url, init) => {
+    if (new URL(String(url)).pathname === '/api/v1/public/jobs') {
+      jobSearches += 1;
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], total: 0 }) };
+    }
+    return realFetch(url, init);
+  };
+  // The model wrongly reaches for a job search every time.
+  setAIProvider({
+    name: 'hiring-visitor-provider',
+    async checkHealth() { return { available: true, model: 'test' }; },
+    async chat({ messages = [] }) {
+      const last = messages[messages.length - 1];
+      if (last?.role === 'tool') return { text: 'HirePool helps companies hire faster. Would you like to create your **Employer / Company account**?', model: 'test', finishReason: 'stop' };
+      return {
+        text: '',
+        toolCalls: [{ id: 'call-h', name: 'hirepool_search_jobs', arguments: { query: 'software engineer', location: 'remote' } }],
+        model: 'test',
+        finishReason: 'tool_calls'
+      };
+    }
+  });
+  const app = createApp();
+  const send = (message, conversationId) => request(app)
+    .post('/api/chat')
+    .set('Origin', 'http://localhost:3000')
+    .send({ assistantId: 'hirepool', message, ...(conversationId ? { conversationId } : {}) })
+    .expect(200);
+
+  const hiring = await send("I'm hiring for my company");
+  assert.match(hiring.body.text, /Employer \/ Company account/);
+  const yes = await send('yes', hiring.body.conversationId);
+  assert.equal(yes.body.action?.action, 'hirepool_signup', JSON.stringify(yes.body).slice(0, 200));
+  assert.equal(yes.body.action?.parameters?.role, 'client', 'company signup, not candidate');
+  assert.equal(jobSearches, 0);
+
+  // Later, a vague message from the same hiring visitor: still no job search or candidate card.
+  const vague = await send('tell me more', hiring.body.conversationId);
+  assert.equal(jobSearches, 0, 'no job search for a hiring visitor');
+  assert.notEqual(vague.body.action?.parameters?.role, 'candidate');
+  assert.doesNotMatch(vague.body.text || '', /couldn't find an open/);
+});
