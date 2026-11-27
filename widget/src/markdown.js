@@ -44,22 +44,27 @@ export function parseMarkdown(text) {
   md = md.replace(/^# (.*$)/gim, '<h2>$1</h2>');
 
   // Step 5: Bold and Italic
-  md = md.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>');
-  md = md.replace(/\*([^*]+)\*/g, '<em>$1</em>');
-  md = md.replace(/__([^_]+)__/g, '<strong>$1</strong>');
-  md = md.replace(/_([^_]+)_/g, '<em>$1</em>');
+  // Emphasis stays on one line, and underscores inside words (full_time, job_id) are left alone.
+  md = md.replace(/\*\*([^*\n]+)\*\*/g, '<strong>$1</strong>');
+  md = md.replace(/(^|[^\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])/gm, '$1<em>$2</em>');
+  md = md.replace(/(^|[^\w])__(?!\s)([^_\n]+?)__(?!\w)/gm, '$1<strong>$2</strong>');
+  md = md.replace(/(^|[^\w])_(?!\s)([^_\n]+?)_(?!\w)/gm, '$1<em>$2</em>');
 
   // Step 6: Blockquotes
   md = md.replace(/^\> (.*$)/gim, '<blockquote>$1</blockquote>');
 
   // Step 7: Unordered lists
   md = md.replace(/^\s*[-*+]\s+(.*)$/gim, '<li>$1</li>');
-  md = md.replace(/(<li>.*<\/li>)/gims, (match) => {
-    // Only wrap consecutive li items if not inside pre
-    return `<ul>${match}</ul>`;
+  // Wrap each run of consecutive items in its own list, so a heading between two lists
+  // (e.g. "### 2. Next job") is not swallowed into the list above it.
+  md = md.replace(/(?:^<li>.*<\/li>$\n?)+/gm, (match) => {
+    const trailing = match.endsWith('\n') ? '\n' : '';
+    return `<ul>${match.replace(/\n/g, '')}</ul>${trailing}`;
   });
   // Clean up nested adjacent uls
   md = md.replace(/<\/ul>\s*<ul>/g, '');
+  // A list is its own block (never inside a <p> after a line break).
+  md = md.replace(/\n?(<ul>.*?<\/ul>)\n?/g, '\n\n$1\n\n');
 
   // Step 8: Links (sanitized with target and rel)
   md = md.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');

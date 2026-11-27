@@ -2457,3 +2457,96 @@
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Status line icons stay text-sized (the success tick was drawn huge). */
+.ai-action-status-msg svg {
+  flex: none;
+  height: 14px;
+  width: 14px;
+}
+
+.ai-review-val {
+  white-space: pre-line;
+}
+
+/* Candidates: one education / work-experience entry in a small form. */
+.ai-ef-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.ai-ef-grid > .ai-pf-field {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.ai-ef-grid > .ai-pf-field.ai-ef-half {
+  grid-column: auto;
+}
+
+.ai-ef-grid input[type="month"] {
+  min-width: 0;
+  width: 100%;
+}
+
+.ai-ef-req {
+  color: #dc2626;
+}
+
+.ai-ef-check-label {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.ai-ef-saved {
+  background: var(--ai-surface-alt);
+  border-radius: var(--ai-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+}
+
+.ai-ef-saved-item {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.ai-ef-saved-item.is-editing .ai-ef-saved-text {
+  font-weight: 600;
+}
+
+.ai-ef-saved-text {
+  color: var(--ai-text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.ai-ef-edit {
+  background: none;
+  border: 1px solid var(--ai-border);
+  border-radius: 999px;
+  color: var(--ai-text);
+  cursor: pointer;
+  flex: none;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.ai-ef-edit:hover {
+  border-color: #84cc16;
+}
+
+@media (max-width: 360px) {
+  .ai-ef-grid {
+    grid-template-columns: 1fr;
+  }
+}

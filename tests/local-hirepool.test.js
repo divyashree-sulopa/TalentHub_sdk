@@ -1253,7 +1253,7 @@ test('confirmed profile update is followed by a fresh profile read', async () =>
   ]);
   assert.equal(verified.data.verificationStatus, 'verified');
   assert.equal(verified.data.verifiedProfile.first_name, 'Updated');
-  assert.match(verified.message, /fresh profile read verified/);
+  assert.match(verified.message, /Saved to your HirePool profile/);
 });
 
 test('candidate matching uses HirePool match scores and excludes applications and pending screening', async () => {

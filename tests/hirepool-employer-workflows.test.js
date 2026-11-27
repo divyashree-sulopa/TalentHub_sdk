@@ -705,7 +705,7 @@ test('Employer Workflow 8: Hyphen field extraction, 5 openings, prompt only for 
   assert.match(turn2Res.body.text, /Experience Level/);
   assert.match(turn2Res.body.text, /Salary Range/);
   assert.match(turn2Res.body.text, /Required Skills/);
-  assert.match(turn2Res.body.text, /Confirm & Execute/i);
+  assert.match(turn2Res.body.text, /\*\*Confirm\*\*/i);
 
   // 4. User cancels job creation -> cancels and clears pending job creation state
   const cancelRes = await request(app)

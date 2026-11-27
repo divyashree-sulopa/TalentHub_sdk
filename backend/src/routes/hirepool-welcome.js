@@ -4,7 +4,8 @@ import { logRequestError } from '../middleware/logger.js';
 import { createRequestActionRegistry, executeDynamicApiAction, executeDynamicApiRead } from '../dynamic-api/catalog.js';
 import { getAssistantActionRegistry } from '../../../connectors/bridge.js';
 import { ASSISTANT_SURFACES, resolveAssistantSurface } from '../surface.js';
-import { buildAppWelcome } from '../../../integrations/hirepool/app-welcome.js';
+import { buildAppWelcome, computeProfileGaps } from '../../../integrations/hirepool/app-welcome.js';
+import { ENTRY_SECTIONS, buildEntryForm, buildEntryUpdate } from '../../../integrations/hirepool/profile-entry.js';
 import { validateCandidateCreation } from '../dynamic-api/schemas/hirepool-schemas.js';
 import {
   buildProfileForm,
@@ -210,7 +211,9 @@ export function createHirePoolWelcomeRouter() {
       const savedTargets = Object.keys(update.bodies).filter(t => !failures.includes(t));
       const savedKeys = savedTargets.flatMap(t => Object.keys(update.bodies[t]));
       const after = savedTargets.length ? await loadProfiles(req, controller.signal).catch(() => null) : null;
-      const form = after ? buildProfileForm(user.role, { profile: after.profile, userProfile: after.userProfile }, { mode: 'missing' }) : null;
+      // Same count as the welcome's progress card, so the numbers always agree.
+      const gaps = after ? computeProfileGaps(user.role, { profile: after.profile, userProfile: after.userProfile }) : null;
+      const form = gaps ? { missingCount: gaps.missing.length, completion: gaps.completion } : null;
       if (failures.length && !savedTargets.length) {
         const message = failures.includes('profile') && user.role !== 'candidate'
           ? "I couldn't save these details. Only organisation admins can change the company or agency profile; your personal details can still be updated."
@@ -231,6 +234,93 @@ export function createHirePoolWelcomeRouter() {
     } catch (error) {
       logRequestError(error, req);
       return res.status(502).json({ error: { code: 'SAVE_FAILED', message: "I couldn't save your profile just now. Please try again." } });
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
+  // ---------------------------------------------------------------------------
+  // Candidates: add or edit one education / work-experience entry in a form.
+  // Pressing Save on the form (which shows exactly what is saved) is the approval.
+  // ---------------------------------------------------------------------------
+  const entryGuard = (req, res) => {
+    if (!guard(req, res)) return null;
+    if (req.user.role !== 'candidate') {
+      res.status(403).json({ error: { code: 'ROLE_NOT_ALLOWED', message: 'Education and work experience are part of a candidate profile.' } });
+      return null;
+    }
+    const section = req.body?.section;
+    if (!Object.hasOwn(ENTRY_SECTIONS, section)) {
+      res.status(400).json({ error: { code: 'INVALID_SECTION', message: 'Choose education or work experience.' } });
+      return null;
+    }
+    return section;
+  };
+
+  router.post('/profile-entry/prepare', authenticate(), async (req, res) => {
+    const section = entryGuard(req, res);
+    if (!section) return undefined;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROFILE_FORM_TIMEOUT_MS);
+    res.on('close', () => controller.abort());
+    try {
+      const { profile } = await loadProfiles(req, controller.signal);
+      if (!profile) {
+        return res.status(503).json({ error: { code: 'PROFILE_UNAVAILABLE', message: "I couldn't load your profile just now. Please try again in a moment." } });
+      }
+      const message = typeof req.body?.text === 'string' ? req.body.text.slice(0, 1000) : '';
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json(buildEntryForm(section, profile, { text: message }));
+    } catch (error) {
+      logRequestError(error, req);
+      return res.status(503).json({ error: { code: 'PROFILE_UNAVAILABLE', message: "I couldn't load your profile just now. Please try again in a moment." } });
+    } finally {
+      clearTimeout(timeout);
+    }
+  });
+
+  router.post('/profile-entry', authenticate(), async (req, res) => {
+    const section = entryGuard(req, res);
+    if (!section) return undefined;
+    const user = req.user;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), PROFILE_FORM_TIMEOUT_MS);
+    res.on('close', () => controller.abort());
+    try {
+      const { registry, profile } = await loadProfiles(req, controller.signal);
+      if (!profile) {
+        return res.status(503).json({ error: { code: 'PROFILE_UNAVAILABLE', message: "I couldn't load your profile just now, so nothing was saved. Please try again." } });
+      }
+      const index = Number.isInteger(req.body?.index) ? req.body.index : null;
+      const update = buildEntryUpdate(section, profile, { entry: req.body?.entry, index });
+      if (!update.ok) {
+        return res.status(422).json({ error: { code: 'INVALID_FIELDS', message: update.errors.form || 'Please fix the highlighted fields.', fields: update.errors } });
+      }
+      const action = findWriteAction(registry, PROFILE_WRITE_OPERATIONS.candidate.profile);
+      if (!action) {
+        return res.status(503).json({ error: { code: 'SAVE_FAILED', message: "Saving your profile is unavailable right now. Please try again later." } });
+      }
+      try {
+        await executeDynamicApiAction(action, { body: update.body }, user, { signal: controller.signal, approved: true });
+      } catch (error) {
+        logRequestError(error, req);
+        return res.status(502).json({ error: { code: 'SAVE_FAILED', message: "I couldn't save this just now. Nothing was changed, please try again." } });
+      }
+      const after = await loadProfiles(req, controller.signal).catch(() => null);
+      const progress = after?.profile ? computeProfileGaps('candidate', { profile: after.profile }) : null;
+      res.setHeader('Cache-Control', 'no-store');
+      return res.json({
+        saved: true,
+        section,
+        isNew: update.isNew,
+        summary: update.summary,
+        completion: progress?.completion ?? null,
+        missingCount: progress ? progress.missing.length : null,
+        missing: progress ? progress.missing.slice(0, 4) : []
+      });
+    } catch (error) {
+      logRequestError(error, req);
+      return res.status(502).json({ error: { code: 'SAVE_FAILED', message: "I couldn't save this just now. Please try again." } });
     } finally {
       clearTimeout(timeout);
     }

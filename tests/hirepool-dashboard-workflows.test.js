@@ -199,6 +199,33 @@ test('website bot and all three dashboard role workflows work end to end', { tim
     check('candidate: profile form saves to HirePool', save.status === 200 && save.body.saved && db.candidateProfile.current_location === 'Bengaluru' && db.candidateProfile.years_of_experience === 3, JSON.stringify(save.body).slice(0, 120));
     const bad = await api('post', 'profile-form', c, { values: { years_of_experience: '90' } });
     check('candidate: invalid value is explained per field', bad.status === 422 && bad.body.error?.fields?.years_of_experience, bad.status);
+    // Education / work experience: one small form each, pre-filled from what was typed.
+    const eduForm = await api('post', 'profile-entry/prepare', c, { section: 'education', text: 'PESITM B.E. Artificial Intelligence and Machine Learning December 2022 to June 2026 9CGPA' });
+    check('candidate: education form is pre-filled from the typed text',
+      eduForm.status === 200 && eduForm.body.prefill?.institution === 'PESITM' && eduForm.body.prefill?.degree === 'B.E' && eduForm.body.prefill?.start_date === '2022-12',
+      JSON.stringify(eduForm.body).slice(0, 160));
+    const eduMissing = await api('post', 'profile-entry', c, { section: 'education', entry: { degree: 'B.E' } });
+    check('candidate: education form explains a missing college', eduMissing.status === 422 && eduMissing.body.error?.fields?.institution, JSON.stringify(eduMissing.body).slice(0, 120));
+    const eduSave = await api('post', 'profile-entry', c, { section: 'education', entry: { institution: 'PES Institute of Technology and Management', degree: 'B.E', field_of_study: 'AI & ML', start_date: '2022-12', end_date: '2026-06', grade: '9 CGPA' } });
+    check('candidate: education is saved to HirePool with a readable summary',
+      eduSave.status === 200 && eduSave.body.saved && db.candidateProfile.education.length === 1 &&
+      db.candidateProfile.education[0].institution === 'PES Institute of Technology and Management' &&
+      /Dec 2022 – Jun 2026/.test(eduSave.body.summary || ''),
+      JSON.stringify(eduSave.body).slice(0, 160));
+    const eduEdit = await api('post', 'profile-entry', c, { section: 'education', index: 0, entry: { institution: 'PES University', degree: 'B.E', start_date: '2022-12', end_date: '2026-06' } });
+    check('candidate: editing an entry replaces it (no duplicate)',
+      eduEdit.status === 200 && eduEdit.body.isNew === false && db.candidateProfile.education.length === 1 && db.candidateProfile.education[0].institution === 'PES University',
+      JSON.stringify(db.candidateProfile.education));
+    const workSave = await api('post', 'profile-entry', c, { section: 'work_experience', entry: { company: 'Infosys', title: 'Software Engineer', start_date: '2024-01', end_date: '2025-01', is_current: true } });
+    check('candidate: current job is saved with no end date',
+      workSave.status === 200 && db.candidateProfile.work_experience.length === 1 && db.candidateProfile.work_experience[0].is_current === true && db.candidateProfile.work_experience[0].end_date === null &&
+      /Jan 2024 – Present/.test(workSave.body.summary || ''),
+      JSON.stringify(workSave.body).slice(0, 160));
+    const workForm = await api('post', 'profile-entry/prepare', c, { section: 'work_experience' });
+    check('candidate: the form lists what is already saved', workForm.body.entries?.[0]?.summary === 'Software Engineer at Infosys (Jan 2024 – Present)', JSON.stringify(workForm.body.entries));
+    check('candidate: progress after saving matches the welcome count', Number.isInteger(workSave.body.missingCount), JSON.stringify(workSave.body));
+    const agencyEntry = await api('post', 'profile-entry/prepare', sessions.consultancy.credential, { section: 'education' });
+    check('agency: candidate-only entry form is refused', agencyEntry.status === 403, agencyEntry.status);
     const up = await upload(A, RESUME, 'cv.txt', c);
     check('candidate: resume upload offers fill/jobs/save', up.body.insight?.options?.map(o => o.id).join() === 'fill_profile,find_jobs,save_resume', JSON.stringify(up.body.insight || up.body.error).slice(0, 120));
     const show = await chat(A, 'Show my profile', null, c);

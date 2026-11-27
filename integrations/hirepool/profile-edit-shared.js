@@ -111,6 +111,27 @@ export function compareYearMonth(start, end) {
 /**
  * Parse and normalize a month/year string into HirePool UI format (`YYYY-MM` or `YYYY`).
  */
+/** One entry per line in a review card's table cell. */
+export const ENTRY_SEPARATOR = String.fromCharCode(10);
+
+const MONTH_SHORT = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+/** "2022-12" (or "2022-12-01") -> "Dec 2022"; anything else is returned as given. */
+export function formatMonthYear(value) {
+  const match = String(value ?? '').trim().match(/^(\d{4})-(\d{1,2})(?:-\d{1,2})?$/);
+  if (!match) return String(value ?? '').trim();
+  const month = Number(match[2]);
+  return month >= 1 && month <= 12 ? `${MONTH_SHORT[month - 1]} ${match[1]}` : match[1];
+}
+
+/** "Dec 2022 – Jun 2026", "Jan 2024 – Present", or '' when there are no dates. */
+export function formatDateSpan(start, end, { current = false } = {}) {
+  const from = start ? formatMonthYear(start) : '';
+  const to = current ? 'Present' : (end ? formatMonthYear(end) : '');
+  if (from && to) return `${from} – ${to}`;
+  return from || to;
+}
+
 export function parseHirePoolMonthDate(raw, { allowPresent = false } = {}) {
   if (raw === null || raw === undefined || raw === '') {
     return { valid: true, value: null, isPresent: false };
@@ -977,43 +998,43 @@ export function formatRoleProfileReview({
     if (key === 'education' && Array.isArray(nextVal)) {
       const existingCount = Array.isArray(currVal) ? currVal.length : 0;
       const summaryEntries = nextVal.map((edu, idx) => {
-        const span = [edu.start_date, edu.end_date].filter(Boolean).join(' to ');
+        const span = formatDateSpan(edu.start_date, edu.end_date);
         const parts = [edu.degree, edu.field_of_study, edu.institution].filter(Boolean).join(' — ');
-        return `${idx + 1}. ${parts}${span ? ` (${span})` : ''}${edu.grade ? ` [${edu.grade}]` : ''}`;
+        return `${parts}${span ? ` (${span})` : ''}${edu.grade ? `, ${edu.grade}` : ''}`;
       });
       fields.push({
-        label: `Education (${nextVal.length} total, ${existingCount} existing)`,
-        value: summaryEntries.join(' | ') || '(none)'
+        label: 'Education',
+        value: summaryEntries.join(ENTRY_SEPARATOR) || '(none)'
       });
-      lines.push(`- **Education (${nextVal.length} total):**`, ...summaryEntries.map(s => `  - ${s}`));
+      lines.push(`- **Education:**`, ...summaryEntries.map(s => `  - ${s}`));
       continue;
     }
 
     if (key === 'work_experience' && Array.isArray(nextVal)) {
       const existingCount = Array.isArray(currVal) ? currVal.length : 0;
       const summaryEntries = nextVal.map((exp, idx) => {
-        const span = [exp.start_date, exp.is_current ? 'Present' : exp.end_date].filter(Boolean).join(' to ');
-        return `${idx + 1}. ${exp.title} at ${exp.company}${exp.location ? `, ${exp.location}` : ''}${span ? ` (${span})` : ''}`;
+        const span = formatDateSpan(exp.start_date, exp.end_date, { current: exp.is_current });
+        return `${exp.title} at ${exp.company}${exp.location ? `, ${exp.location}` : ''}${span ? ` (${span})` : ''}`;
       });
       fields.push({
-        label: `Work Experience (${nextVal.length} total, ${existingCount} existing)`,
-        value: summaryEntries.join(' | ') || '(none)'
+        label: 'Work experience',
+        value: summaryEntries.join(ENTRY_SEPARATOR) || '(none)'
       });
-      lines.push(`- **Work Experience (${nextVal.length} total):**`, ...summaryEntries.map(s => `  - ${s}`));
+      lines.push(`- **Work experience:**`, ...summaryEntries.map(s => `  - ${s}`));
       continue;
     }
 
     if (key === 'certifications' && Array.isArray(nextVal)) {
       const existingCount = Array.isArray(currVal) ? currVal.length : 0;
       const summaryEntries = nextVal.map((cert, idx) => {
-        const span = [cert.issue_date, cert.expiry_date].filter(Boolean).join(' to ');
-        return `${idx + 1}. ${cert.name}${cert.issuing_organization ? ` by ${cert.issuing_organization}` : ''}${span ? ` (${span})` : ''}`;
+        const span = formatDateSpan(cert.issue_date, cert.expiry_date);
+        return `${cert.name}${cert.issuing_organization ? ` by ${cert.issuing_organization}` : ''}${span ? ` (${span})` : ''}`;
       });
       fields.push({
-        label: `Certifications (${nextVal.length} total, ${existingCount} existing)`,
-        value: summaryEntries.join(' | ') || '(none)'
+        label: 'Certifications',
+        value: summaryEntries.join(ENTRY_SEPARATOR) || '(none)'
       });
-      lines.push(`- **Certifications (${nextVal.length} total):**`, ...summaryEntries.map(s => `  - ${s}`));
+      lines.push(`- **Certifications:**`, ...summaryEntries.map(s => `  - ${s}`));
       continue;
     }
 
@@ -1031,11 +1052,12 @@ export function formatRoleProfileReview({
   }
   lines.push(
     '',
-    'Choose **“Confirm & Execute”** below to save these changes to HirePool. Reply with edits if you want to adjust anything first, or reply **"Cancel"** to keep your profile unchanged.'
+    'Press **Save** below to update your profile, or **Edit details** to change something first (say **Cancel** to keep it unchanged).'
   );
 
   return {
-    reviewMessage: lines.join('\n'),
+    // The details are in the review card's table; the message only introduces it.
+    reviewMessage: lines.filter(line => !/^\s*-\s+\*\*|^\s{2,}-\s/.test(line)).join('\n').replace(/\n{3,}/g, '\n\n'),
     formattedReview: {
       type: `${profileType}_update`,
       title: titleMap[profileType] || 'Review Profile Update',

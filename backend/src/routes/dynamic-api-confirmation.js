@@ -85,7 +85,7 @@ function resultMessage(actionDefinition, data) {
   }
   if (operationId === 'update_my_profile_api_v1_candidates_profile_put') {
     return data?.verificationStatus === 'verified'
-      ? 'HirePool saved the profile update and a fresh profile read verified it.'
+      ? 'Saved to your HirePool profile.'
       : 'HirePool accepted the profile update, but I could not verify it with a fresh profile read. Retrieve your profile again before relying on the change.';
   }
   if (operationId === 'create_job_api_v1_jobs_post') {
@@ -106,7 +106,7 @@ function resultMessage(actionDefinition, data) {
   }
   if (operationId === 'update_company_profile_api_v1_clients_profile_put') {
     return data?.verificationStatus === 'verified'
-      ? 'Your company profile has been updated successfully and verified in HirePool.'
+      ? 'Saved to your company profile.'
       : 'HirePool accepted the company profile update, but I could not verify it with a fresh profile read. Retrieve your company profile again before relying on the change.';
   }
   if (
@@ -114,12 +114,12 @@ function resultMessage(actionDefinition, data) {
     operationId === 'update_my_user_profile_api_v1_consultancies_me_put'
   ) {
     return data?.verificationStatus === 'verified'
-      ? 'Your personal HirePool account profile has been updated and verified.'
+      ? 'Saved to your account details.'
       : 'HirePool accepted the personal profile update, but I could not verify it with a fresh read. Retrieve your account profile again before relying on the change.';
   }
   if (operationId === 'update_consultancy_profile_api_v1_consultancies_profile_put') {
     return data?.verificationStatus === 'verified'
-      ? 'Your consultancy profile has been updated successfully and verified in HirePool.'
+      ? 'Saved to your agency profile.'
       : 'HirePool accepted the consultancy profile update, but I could not verify it with a fresh profile read. Retrieve your consultancy profile again before relying on the change.';
   }
   return `HirePool confirmed ${actionDefinition.metadata.dynamicApi.description || 'the requested update'}.`;

@@ -12,6 +12,14 @@
 
 import { formatPublicJobResults } from './public-jobs.js';
 
+/** full_time -> Full-time, onsite -> On-site (shown to people, never raw codes). */
+function humanizeValue(value) {
+  const text = String(value ?? '').trim();
+  const known = { full_time: 'Full-time', part_time: 'Part-time', onsite: 'On-site', on_site: 'On-site', remote: 'Remote', hybrid: 'Hybrid', contract: 'Contract', permanent: 'Permanent' }[text.toLowerCase()];
+  if (known) return known;
+  return /_/.test(text) ? text.replace(/_/g, ' ') : text;
+}
+
 export const DOCUMENT_KINDS = Object.freeze({
   RESUME: 'resume',
   JOB_DESCRIPTION: 'job_description',
@@ -230,8 +238,8 @@ export function composeJobCreateMessage(fields) {
     f.title && `Job title: ${f.title}`,
     f.description && `Description: ${f.description.replace(/\b(?:locations?|work\s*type|employment\s*type|experience|salary|skills?|openings?|deadline)\s*[:=]/gi, m => m.replace(/[:=]/, ' -'))}`,
     f.location && `Location: ${f.location}`,
-    f.work_type && `Work type: ${f.work_type}`,
-    f.employment_type && `Employment type: ${f.employment_type}`,
+    f.work_type && `Work type: ${humanizeValue(f.work_type)}`,
+    f.employment_type && `Employment type: ${humanizeValue(f.employment_type)}`,
     f.experience_level && `Experience level: ${f.experience_level}`,
     Array.isArray(f.skills) && f.skills.length && `Required skills: ${f.skills.join(', ')}`
   ].filter(Boolean).join('\n');
@@ -312,10 +320,10 @@ export function buildDashboardDocumentInsight({ role, filename, text }) {
     }
     const job = extractJobFieldsFromDescription(text);
     const facts = [
-      job.location && `- **Location:** ${job.location}${job.work_type ? ` · ${job.work_type}` : ''}`,
+      job.location && `- **Location:** ${job.location}${job.work_type ? ` · ${humanizeValue(job.work_type)}` : ''}`,
       Number.isInteger(job.years) && `- **Experience:** ${job.years}+ years`,
       job.skills.length && `- **Skills:** ${job.skills.slice(0, 6).join(', ')}`,
-      job.employment_type && `- **Type:** ${job.employment_type}`
+      job.employment_type && `- **Type:** ${humanizeValue(job.employment_type)}`
     ].filter(Boolean);
     return {
       kind,

@@ -199,12 +199,12 @@ export async function handleHirePoolJobCreateTurn({
   if (currentState?.stage === 'awaiting_confirmation' && isConfirming && currentState?.confirmationToken) {
     return {
       handled: true,
-      text: 'Please review the details in the card above and select **Confirm & Execute** to finalize and post this job to HirePool.',
+      text: 'Please review the details in the card above and select **Confirm** to finalize and post this job to HirePool.',
       hostAction: currentState.hostAction || {
         id: currentState.confirmationToken,
         action: 'create_job_api_v1_jobs_post',
         title: 'Review Job Details',
-        explanation: 'Review the job details and choose Confirm & Execute to publish to HirePool.',
+        explanation: 'Review the job details and choose Confirm to publish to HirePool.',
         requiresConfirmation: true,
         confirmationToken: currentState.confirmationToken
       }
@@ -265,7 +265,7 @@ export async function handleHirePoolJobCreateTurn({
         `- **Salary Range:** ${salaryStr}`,
         `- **Required Skills:** ${skillsStr}`,
         '',
-        'Please review the details above and choose **Confirm & Execute** (or reply to confirm) to publish this job to HirePool.'
+        'Please review the details above and choose **Confirm** (or reply to confirm) to publish this job to HirePool.'
       ].join('\n');
 
       return {

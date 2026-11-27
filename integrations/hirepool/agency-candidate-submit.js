@@ -115,7 +115,7 @@ export async function handleHirePoolAgencyCandidateSubmitTurn(
     if (CONFIRM_PATTERN.test(text)) {
       return {
         handled: true,
-        text: 'Please click the **Confirm & Execute** button on the candidate submission card above to finalize submitting this candidate to the job opening.',
+        text: 'Please click the **Confirm** button on the candidate submission card above to finalize submitting this candidate to the job opening.',
         hostAction: session.consultancySubmissionDraft.hostAction
       };
     }
@@ -470,7 +470,7 @@ export async function handleHirePoolAgencyCandidateSubmitTurn(
     `- **Job Location:** ${location}`,
     `- **Submission Note:** ${coverNote}`,
     '',
-    'Click **Confirm & Execute** below to submit this candidate to the job opening.'
+    'Click **Confirm** below to submit this candidate to the job opening.'
   ];
 
   const response = {

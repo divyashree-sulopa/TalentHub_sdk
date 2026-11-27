@@ -86,7 +86,7 @@ export function createApp() {
     // Each route checks the verified HirePool session and role itself.)
     const isDashboardProfileForm =
       ['GET', 'POST', 'OPTIONS'].includes(req.method) &&
-      (/^\/api\/hirepool\/assistant\/(?:profile-form|bench-candidates|agency-jobs|bench-submit)$/.test(normalizedPath) ||
+      (/^\/api\/hirepool\/assistant\/(?:profile-form|profile-entry(?:\/prepare)?|bench-candidates|agency-jobs|bench-submit)$/.test(normalizedPath) ||
         // "Save as my resume" on the candidate dashboard (the routes require a verified candidate session).
         /^\/api\/hirepool\/resume\/(?:prepare|confirm|cancel)$/.test(normalizedPath));
     if (isDashboardAssistantWelcome || isDashboardProfileForm) {

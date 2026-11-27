@@ -458,6 +458,27 @@ function resolveHirePoolMatchPercentage(job) {
   return null;
 }
 
+/** Job values as people say them: full_time -> Full-time, onsite -> On-site, active -> Active. */
+const HIREPOOL_VALUE_LABELS = Object.freeze({
+  full_time: 'Full-time', fulltime: 'Full-time', part_time: 'Part-time', parttime: 'Part-time',
+  contract: 'Contract', permanent: 'Permanent', internship: 'Internship', freelance: 'Freelance', temporary: 'Temporary',
+  onsite: 'On-site', on_site: 'On-site', remote: 'Remote', hybrid: 'Hybrid',
+  active: 'Active', open: 'Open', closed: 'Closed', paused: 'Paused', draft: 'Draft', filled: 'Filled', on_hold: 'On hold'
+});
+
+export function humanizeHirePoolValue(value) {
+  if (value === null || value === undefined) return '';
+  const text = String(value).trim();
+  if (!text) return '';
+  const known = HIREPOOL_VALUE_LABELS[text.toLowerCase()];
+  if (known) return known;
+  if (/^[a-z][a-z0-9]*(?:_[a-z0-9]+)+$/.test(text)) {
+    const words = text.split('_').join(' ');
+    return words.charAt(0).toUpperCase() + words.slice(1);
+  }
+  return text;
+}
+
 function formatMatchingJobs(jobs, notes = []) {
   const available = (Array.isArray(jobs) ? jobs : []).slice().sort((left, right) => {
     const leftScore = resolveHirePoolMatchPercentage(left) ?? -1;
@@ -478,8 +499,8 @@ function formatMatchingJobs(jobs, notes = []) {
       ? job.locations.filter(value => typeof value === 'string' && value.trim())
       : [];
     if (locations.length) lines.push(`- **Location:** ${locations.join(', ')}`);
-    if (job.remote_type) lines.push(`- **Work type:** ${job.remote_type}`);
-    if (job.job_type) lines.push(`- **Job type:** ${job.job_type}`);
+    if (job.remote_type) lines.push(`- **Work type:** ${humanizeHirePoolValue(job.remote_type)}`);
+    if (job.job_type) lines.push(`- **Job type:** ${humanizeHirePoolValue(job.job_type)}`);
     const matchPct = resolveHirePoolMatchPercentage(job);
     lines.push(`- **HirePool match:** ${
       Number.isFinite(matchPct) ? `${matchPct}%` : 'Unavailable (not provided)'
@@ -1052,14 +1073,14 @@ export function formatJobsList(jobs) {
     if (job.department) lines.push(`- **Department:** ${job.department}`);
     const locations = Array.isArray(job.locations) ? job.locations.join(', ') : job.locations;
     if (locations) lines.push(`- **Location:** ${locations}`);
-    if (job.remote_type) lines.push(`- **Work type:** ${job.remote_type}`);
+    if (job.remote_type) lines.push(`- **Work type:** ${humanizeHirePoolValue(job.remote_type)}`);
     if (job.job_type || job.employment_type) {
-      lines.push(`- **Type:** ${job.employment_type || job.job_type}`);
+      lines.push(`- **Type:** ${humanizeHirePoolValue(job.employment_type || job.job_type)}`);
     }
     if (job.salary_min && job.salary_max) {
       lines.push(`- **Salary:** ${job.salary_currency || 'INR'} ${Number(job.salary_min).toLocaleString()} – ${Number(job.salary_max).toLocaleString()}`);
     }
-    lines.push(`- **Status:** ${job.status || 'Active'} | **Openings:** ${job.number_of_openings || 1}`);
+    lines.push(`- **Status:** ${humanizeHirePoolValue(job.status) || 'Active'} | **Openings:** ${job.number_of_openings || 1}`);
     lines.push('');
   }
   return lines.join('\n');
@@ -1232,9 +1253,9 @@ function formatJobDetails(job) {
     ? job.locations.filter(value => typeof value === 'string' && value.trim())
     : [];
   if (locations.length) lines.push(`- **Location:** ${locations.join(', ')}`);
-  if (job.job_type) lines.push(`- **Job type:** ${job.job_type}`);
-  if (job.remote_type) lines.push(`- **Work type:** ${job.remote_type}`);
-  if (job.status) lines.push(`- **Status:** ${job.status}`);
+  if (job.job_type) lines.push(`- **Job type:** ${humanizeHirePoolValue(job.job_type)}`);
+  if (job.remote_type) lines.push(`- **Work type:** ${humanizeHirePoolValue(job.remote_type)}`);
+  if (job.status) lines.push(`- **Status:** ${humanizeHirePoolValue(job.status)}`);
   if (job.application_deadline) lines.push(`- **Application deadline:** ${job.application_deadline}`);
   if (typeof job.description === 'string' && job.description.trim()) {
     lines.push('', job.description.trim().slice(0, 1800));
@@ -1943,7 +1964,7 @@ function getSystemInstructionForUser(assistantConfig, assistantId, verifiedHireP
 Treat every HirePool tool result as internal structured data. Answer the user's question directly in concise, readable Markdown; never return serialized JSON, raw API payloads, tool names, action IDs, confirmation tokens, or implementation details. For profile requests, summarize profile overview, skills, available education/work entries, and missing profile-completion fields; do not quote the professional summary unless explicitly requested, and never invent profile facts.
 For job matching or recommendations, use the candidate matching-jobs operation to obtain HirePool's existing match percentages and ranked active opportunities; also read the candidate's own application history and exclude applied jobs rather than assuming ordinary search is unapplied-only. Report only returned scores, and label missing scores unavailable. Use required skills as requirements, not as proven matches. Do not invent skill matches or score breakdowns. Show only Job title, Company, Location (when available), Work type, Job type, HirePool match percentage, and Required skills (when available) — never output internal Application status or Screening lines in job shortlist summaries. If the candidate asks for an unapplied shortlist, check screening eligibility internally where screening is enabled so an in-progress screening application is not presented as unapplied. Preserve the ranked shortlist in the conversation; resolve "the first one", "apply for the first one", "apply", "show details", and "continue" against the relevant recent job when unambiguous. Before any application write, re-fetch current job/profile/screening/history and follow the existing readiness and explicit confirmation workflow.
 For job requirements, retrieve the selected job details and the candidate-safe screening-requirements result; never infer that screening is absent solely from a summary boolean. If screening data is unavailable or inconclusive, say so and do not claim no questions exist. Never answer, suggest answers to, or submit screening, assessment, interview, or other candidate-evaluation questions on the candidate's behalf. If screening is required, tell the candidate to complete and submit it personally in their HirePool dashboard, then return to this same conversation. Do not prepare an application confirmation before verified readiness checks. When they return, re-fetch the job, candidate profile, screening requirements, and own application history; do not assume completion from their statement. If an application already exists, report its verified status and never submit a duplicate. If available job details or the candidate indicate that an assessment is required but HirePool exposes no candidate-authorized API to verify its completion, explain that limitation, direct the candidate to the dashboard, and do not prepare an application confirmation. Never claim an assessment is absent or complete without verified API data.
-For a job application, use the actual HirePool job details and authenticated candidate profile before preparing the submission. Never supply or infer a candidate ID or create a cover letter unless the candidate provided or approved its contents. Show the verified job and profile summary, then require the explicit “Confirm & Execute” action-card click. A proposed action is not a completed application; report submission only after the SDK returns HirePool's successful response.
+For a job application, use the actual HirePool job details and authenticated candidate profile before preparing the submission. Never supply or infer a candidate ID or create a cover letter unless the candidate provided or approved its contents. Show the verified job and profile summary, then require the explicit “Confirm” action-card click. A proposed action is not a completed application; report submission only after the SDK returns HirePool's successful response.
 For profile completion, retrieve the current profile, ask only about genuinely missing fields, gather information in small steps, show exact proposed changes, then use the existing confirmation-gated update. After success, re-read the profile before reporting it updated. Never fabricate education, work history, skills, certifications, or summary text. For profile changes, show the exact proposed changes and require the confirmation action card. Use the authenticated candidate's own application history for status checks. Only offer withdrawal for an application shown in that history and require the destructive confirmation action card.` : '';
 
     const consultancyActionRules = authUser.role === 'consultancy' ? `
@@ -2912,7 +2933,7 @@ async function processActionOrToolCalls({
               }
             }
             preparationUserMessage = staged.reviewMessage ||
-              'Review the proposed HirePool operation below. It will not run unless you choose “Confirm & Execute”.';
+              'Review the proposed HirePool operation below. It will not run unless you choose “Confirm”.';
             if (staged.ready) {
               hostAction = {
                 ...proposal,
@@ -3254,7 +3275,7 @@ async function processActionOrToolCalls({
           }
         }
         finalText = staged.reviewMessage ||
-          'Review the proposed HirePool operation below. It will not run unless you choose “Confirm & Execute”.';
+          'Review the proposed HirePool operation below. It will not run unless you choose “Confirm”.';
         if (staged.ready) {
           hostAction = {
             ...resolvedAction,

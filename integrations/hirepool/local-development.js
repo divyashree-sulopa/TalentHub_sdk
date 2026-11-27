@@ -617,7 +617,7 @@ function createApplicationReview(job, profile, body, questions = []) {
   lines.push(questions.length
     ? `- Candidate-side screening questions: ${questions.length}`
     : '- Candidate-side screening questions: None required for this job.');
-  lines.push('', 'Choose “Confirm & Execute” below to submit this application, or cancel to make no changes.');
+  lines.push('', 'Choose “Confirm” below to submit this application, or cancel to make no changes.');
   return lines.join('\n');
 }
 
@@ -820,7 +820,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         'I verified the job details according to HirePool specifications. Review the details below:',
         ...validation.formattedReview.fields.map(f => `- **${f.label}**: ${f.value}`),
         '',
-        'Choose “Confirm & Execute” to publish this job to HirePool.'
+        'Choose “Confirm” to publish this job to HirePool.'
       ].join('\n')
     };
   }
@@ -856,7 +856,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         'Review the change to this bench candidate:',
         ...fields.map(f => `- **${f.label}**: ${f.value}`),
         '',
-        'Choose “Confirm & Execute” to save it.'
+        'Choose “Confirm” to save it.'
       ].join('\n')
     };
   }
@@ -880,7 +880,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         'I verified the candidate details before saving to HirePool:',
         ...validation.formattedReview.fields.map(f => `- **${f.label}**: ${f.value}`),
         '',
-        'Choose “Confirm & Execute” to save this candidate profile.'
+        'Choose “Confirm” to save this candidate profile.'
       ].join('\n')
     };
   }
@@ -907,7 +907,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         `- Application ID: ${safeReviewText(application.id)}`,
         `- Withdrawal reason: ${safeReviewText(argumentsValue.body?.reason) || 'None provided'}`,
         '',
-        'Withdrawal is destructive. Check the acknowledgement and choose “Confirm & Execute” only if you want to proceed.'
+        'Withdrawal is destructive. Check the acknowledgement and choose “Confirm” only if you want to proceed.'
       ].join('\n')
     };
   }
@@ -921,7 +921,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         `- Job ID: ${safeReviewText(jobId) || 'Not provided'}`,
         `- Requested update: ${safeReviewText(typeof body === 'object' ? JSON.stringify(body) : String(body), 700) || 'No explicit field changes provided'}`,
         '',
-        'Choose “Confirm & Execute” only if these job changes are correct and you want to save them.'
+        'Choose “Confirm” only if these job changes are correct and you want to save them.'
       ].join('\n')
     };
   }
@@ -935,7 +935,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         `- Status: ${safeReviewText(body.status) || 'Not provided'}`,
         `- Reason: ${safeReviewText(body.reason) || 'No reason provided'}`,
         '',
-        'Choose “Confirm & Execute” only if the target applications and new status are correct.'
+        'Choose “Confirm” only if the target applications and new status are correct.'
       ].join('\n')
     };
   }
@@ -949,7 +949,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         `- Job ID: ${safeReviewText(body.job_id) || 'Not provided'}`,
         `- Cover Note: ${safeReviewText(body.consultancy_cover_note) || 'None provided'}`,
         '',
-        'Review the selected candidate and job opening, then choose “Confirm & Execute” to submit the candidate.'
+        'Review the selected candidate and job opening, then choose “Confirm” to submit the candidate.'
       ].join('\n')
     };
   }
@@ -962,7 +962,7 @@ async function prepareHirePoolAction({ actionDefinition, argumentsValue, user, o
         `- Candidate IDs: ${safeReviewText(Array.isArray(body.candidate_ids) ? body.candidate_ids.join(', ') : JSON.stringify(body.candidate_ids || []), 700) || 'Not provided'}`,
         `- Job ID: ${safeReviewText(body.job_id) || 'Not provided'}`,
         '',
-        'Review the selected candidates and job, then choose “Confirm & Execute” only if the submission is correct.'
+        'Review the selected candidates and job, then choose “Confirm” only if the submission is correct.'
       ].join('\n')
     };
   }

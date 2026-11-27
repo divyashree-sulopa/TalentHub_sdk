@@ -212,7 +212,7 @@ export async function handleAgencyCandidateEditTurn({ message, session, findCand
     const shown = Array.isArray(extracted.value) ? extracted.value.join(', ') : String(extracted.value);
     return {
       handled: true,
-      text: `Update **${target.name}**'s ${fieldSpec.label} to **${shown}**? Press **Confirm & Execute** below to save it.`,
+      text: `Update **${target.name}**'s ${fieldSpec.label} to **${shown}**? Press **Confirm** below to save it.`,
       hostAction: staged.hostAction
     };
   } catch (error) {

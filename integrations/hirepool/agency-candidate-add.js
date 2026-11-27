@@ -294,7 +294,7 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
     if (CONFIRM_PATTERN.test(text)) {
       return {
         handled: true,
-        text: 'Please click the **Confirm & Execute** button on the candidate review card above to finalize adding this candidate to your agency bench.',
+        text: 'Please click the **Confirm** button on the candidate review card above to finalize adding this candidate to your agency bench.',
         hostAction: session.consultancyCandidateDraft.hostAction
       };
     }
@@ -464,7 +464,7 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
     `- **Notice Period:** ${validation.normalized.notice_period_days !== null && validation.normalized.notice_period_days !== undefined ? `${validation.normalized.notice_period_days} days` : 'Not specified'}`,
     `- **Skills:** ${Array.isArray(validation.normalized.skills) && validation.normalized.skills.length > 0 ? validation.normalized.skills.join(', ') : 'None listed'}`,
     '',
-    'Click **Confirm & Execute** below to save this candidate to your agency bench, or reply with changes if anything needs updating.'
+    'Click **Confirm** below to save this candidate to your agency bench, or reply with changes if anything needs updating.'
   ];
 
   const response = {
@@ -479,7 +479,7 @@ export async function handleHirePoolAgencyCandidateAddTurn(optionsOrMessage, ses
       '### Review Candidate Bench Details',
       `Almost done! Check **${n.first_name} ${n.last_name}** (${n.job_title}, ${n.current_location}) in the card below.`,
       '',
-      'Press **Confirm & Execute** to add them to your bench, or reply with any changes, for example *phone 9876543210* or *skills React, Node.js*.'
+      'Press **Confirm** to add them to your bench, or reply with any changes, for example *phone 9876543210* or *skills React, Node.js*.'
     ].join('\n');
     response.hostAction = staged.hostAction;
   } else if (registry) {

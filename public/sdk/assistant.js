@@ -46,16 +46,18 @@ var AssistantSDKBundle = (() => {
     md = md.replace(/^### (.*$)/gim, "<h4>$1</h4>");
     md = md.replace(/^## (.*$)/gim, "<h3>$1</h3>");
     md = md.replace(/^# (.*$)/gim, "<h2>$1</h2>");
-    md = md.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-    md = md.replace(/\*([^*]+)\*/g, "<em>$1</em>");
-    md = md.replace(/__([^_]+)__/g, "<strong>$1</strong>");
-    md = md.replace(/_([^_]+)_/g, "<em>$1</em>");
+    md = md.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+    md = md.replace(/(^|[^\w*])\*(?!\s)([^*\n]+?)\*(?![\w*])/gm, "$1<em>$2</em>");
+    md = md.replace(/(^|[^\w])__(?!\s)([^_\n]+?)__(?!\w)/gm, "$1<strong>$2</strong>");
+    md = md.replace(/(^|[^\w])_(?!\s)([^_\n]+?)_(?!\w)/gm, "$1<em>$2</em>");
     md = md.replace(/^\> (.*$)/gim, "<blockquote>$1</blockquote>");
     md = md.replace(/^\s*[-*+]\s+(.*)$/gim, "<li>$1</li>");
-    md = md.replace(/(<li>.*<\/li>)/gims, (match) => {
-      return `<ul>${match}</ul>`;
+    md = md.replace(/(?:^<li>.*<\/li>$\n?)+/gm, (match) => {
+      const trailing = match.endsWith("\n") ? "\n" : "";
+      return `<ul>${match.replace(/\n/g, "")}</ul>${trailing}`;
     });
     md = md.replace(/<\/ul>\s*<ul>/g, "");
+    md = md.replace(/\n?(<ul>.*?<\/ul>)\n?/g, "\n\n$1\n\n");
     md = md.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
     const paragraphs = md.split(/\n{2,}/);
     const formatted = paragraphs.map((p) => {
@@ -3952,6 +3954,12 @@ var AssistantSDKBundle = (() => {
         bubble.innerHTML = `<div class="ai-profile-form-error">I couldn't load your profile just now. Please try again in a moment.</div>`;
         return false;
       }
+      const missingSections = (form.chatSections || []).filter((section) => section.missing);
+      if (mode === "missing" && form.fields.length === 0 && missingSections.length && this._entryFormHandlers) {
+        row.remove();
+        const opened = await this.showEntryForm(missingSections[0].key);
+        if (opened) return true;
+      }
       if (mode === "missing" && form.fields.length === 0 && !(form.chatSections || []).length) {
         row.remove();
         this.updateProfileProgress(null);
@@ -4008,8 +4016,8 @@ var AssistantSDKBundle = (() => {
           </div>`).join("")}
         ${chatSections.length ? `
           <div class="ai-pf-chat-sections">
-            <div class="ai-pf-hint">These need a few details each, so we'll add them together in chat:</div>
-            ${chatSections.map((s) => `<button type="button" class="ai-pf-chat-btn" data-prompt="${escapeHtml(s.prompt)}">${escapeHtml(s.missing ? `Add ${s.label.toLowerCase()}` : `Edit ${s.label.toLowerCase()}`)}</button>`).join("")}
+            <div class="ai-pf-hint">${this._entryFormHandlers ? "Each of these has its own short form:" : "These need a few details each, so we'll add them together in chat:"}</div>
+            ${chatSections.map((s) => `<button type="button" class="ai-pf-chat-btn" data-section="${escapeHtml(s.key)}" data-prompt="${escapeHtml(s.prompt)}">${escapeHtml(s.missing ? `Add ${s.label.toLowerCase()}` : `Edit ${s.label.toLowerCase()}`)}</button>`).join("")}
           </div>` : ""}
         <div class="ai-pf-form-error" role="alert"></div>
         <div class="ai-pf-actions">
@@ -4041,8 +4049,9 @@ var AssistantSDKBundle = (() => {
         });
       });
       bubble.querySelectorAll(".ai-pf-chat-btn").forEach((button) => {
-        button.addEventListener("click", () => {
+        button.addEventListener("click", async () => {
           row?.remove();
+          if (this._entryFormHandlers && button.dataset.section && await this.showEntryForm(button.dataset.section)) return;
           void this.sendMessage(button.dataset.prompt);
         });
       });
@@ -4115,6 +4124,211 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
         }
       });
       this._scrollToBottom();
+    }
+    /** Candidates: how to load and save one education / work-experience entry (set by the SDK). */
+    setEntryFormHandlers(handlers) {
+      this._entryFormHandlers = handlers && typeof handlers.prepare === "function" && typeof handlers.save === "function" ? handlers : null;
+    }
+    /**
+     * Candidates: a small form for one education or work-experience entry, pre-filled with
+     * whatever the user already typed. Returns false (and shows nothing) when the account
+     * cannot use it, so the message goes to the chat as usual.
+     */
+    async showEntryForm(section, { text = "" } = {}) {
+      if (!this._entryFormHandlers || !this.messagesList) return false;
+      if (!["education", "work_experience"].includes(section)) return false;
+      if (!this.isOpen) this.open({ focus: false });
+      this.messagesList.querySelectorAll(".ai-profile-form-row, .ai-nudge-row").forEach((el) => el.remove());
+      this._clearQuickReplies();
+      const row = document.createElement("div");
+      row.className = "ai-message-row assistant ai-signup-row ai-profile-form-row ai-entry-form-row";
+      const bubble = document.createElement("div");
+      bubble.className = "ai-bubble ai-profile-form-card";
+      bubble.innerHTML = '<div class="ai-profile-form-loading">Opening the form\u2026</div>';
+      row.appendChild(bubble);
+      this.messagesList.appendChild(row);
+      this._scrollToBottom();
+      let form;
+      try {
+        form = await this._entryFormHandlers.prepare(section, text);
+      } catch (error) {
+        if (error?.status === 403 || error?.status === 400) {
+          row.remove();
+          return false;
+        }
+        bubble.innerHTML = `<div class="ai-profile-form-error">${escapeHtml(error?.message || "I couldn't open the form just now. Please try again in a moment.")}</div>`;
+        return true;
+      }
+      if (!form || !Array.isArray(form.fields)) {
+        row.remove();
+        return false;
+      }
+      this._renderEntryForm(bubble, form);
+      this.events.emit("profile-form:shown", { mode: "entry", section });
+      return true;
+    }
+    _renderEntryForm(bubble, form) {
+      const row = bubble.closest(".ai-message-row");
+      const id = (key) => `ai-ef-${form.section}-${key}`;
+      let editingIndex = null;
+      const entries = Array.isArray(form.entries) ? form.entries : [];
+      const controlHtml = (field) => {
+        const common = `id="${id(field.key)}" name="${escapeHtml(field.key)}" class="ai-form-input"`;
+        const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
+        const max = field.maxLength ? ` maxlength="${Number(field.maxLength)}"` : "";
+        if (field.type === "textarea") return `<textarea ${common} rows="2"${placeholder}${max}></textarea>`;
+        if (field.type === "checkbox") return `<input type="checkbox" id="${id(field.key)}" name="${escapeHtml(field.key)}">`;
+        if (field.type === "month") return `<input type="month" ${common} min="1950-01" max="2100-12" placeholder="YYYY-MM">`;
+        return `<input type="text" ${common}${placeholder}${max}>`;
+      };
+      const fieldsHtml = form.fields.map((field) => field.type === "checkbox" ? `<div class="ai-pf-field ai-ef-check" data-key="${escapeHtml(field.key)}">
+          <label class="ai-pf-chip ai-ef-check-label">${controlHtml(field)}<span>${escapeHtml(field.label)}</span></label>
+        </div>` : `<div class="ai-pf-field${field.type === "month" ? " ai-ef-half" : ""}" data-key="${escapeHtml(field.key)}">
+          <label class="ai-pf-label" for="${id(field.key)}">${escapeHtml(field.label)}${field.required ? ' <span class="ai-ef-req" aria-hidden="true">*</span>' : ""}</label>
+          ${controlHtml(field)}
+          <div class="ai-pf-error" role="alert"></div>
+        </div>`).join("");
+      bubble.innerHTML = `
+      <form class="ai-profile-form ai-entry-form" novalidate>
+        <div class="ai-pf-head">
+          <div class="ai-pf-title">${escapeHtml(form.title)}</div>
+          <div class="ai-pf-subtitle">Fill in the details and press Save.${Number.isFinite(form.completion) ? ` <span class="ai-pf-progress">${form.completion}% complete</span>` : ""}</div>
+        </div>
+        ${entries.length ? `
+          <div class="ai-ef-saved">
+            <div class="ai-pf-hint">Already on your profile:</div>
+            ${entries.map((entry) => `
+              <div class="ai-ef-saved-item">
+                <span class="ai-ef-saved-text">${escapeHtml(entry.summary)}</span>
+                <button type="button" class="ai-ef-edit" data-index="${Number(entry.index)}">Edit</button>
+              </div>`).join("")}
+          </div>` : ""}
+        <div class="ai-ef-grid">${fieldsHtml}</div>
+        <div class="ai-pf-form-error" role="alert"></div>
+        <div class="ai-pf-actions">
+          <button type="submit" class="ai-btn-action-confirm ai-pf-save">Save</button>
+          <button type="button" class="ai-btn-action-cancel ai-pf-cancel">Cancel</button>
+        </div>
+      </form>
+    `;
+      const formEl = bubble.querySelector("form");
+      const titleEl = bubble.querySelector(".ai-pf-title");
+      const saveBtn = bubble.querySelector(".ai-pf-save");
+      const formError = bubble.querySelector(".ai-pf-form-error");
+      const currentBox = formEl.querySelector(`#${CSS.escape(id("is_current"))}`);
+      const endWrap = formEl.querySelector('.ai-pf-field[data-key="end_date"]');
+      const syncCurrent = () => {
+        if (!currentBox || !endWrap) return;
+        endWrap.style.display = currentBox.checked ? "none" : "";
+      };
+      const fill = (values) => {
+        for (const field of form.fields) {
+          const el = formEl.querySelector(`#${CSS.escape(id(field.key))}`);
+          if (!el) continue;
+          if (field.type === "checkbox") el.checked = values?.[field.key] === true;
+          else el.value = typeof values?.[field.key] === "string" ? values[field.key] : "";
+        }
+        syncCurrent();
+      };
+      const clearErrors = () => {
+        formError.textContent = "";
+        bubble.querySelectorAll(".ai-pf-field.has-error").forEach((el) => {
+          el.classList.remove("has-error");
+          const err = el.querySelector(".ai-pf-error");
+          if (err) err.textContent = "";
+        });
+      };
+      fill(form.prefill || {});
+      currentBox?.addEventListener("change", syncCurrent);
+      bubble.querySelectorAll(".ai-ef-edit").forEach((button) => {
+        button.addEventListener("click", () => {
+          const entry = entries.find((e) => e.index === Number(button.dataset.index));
+          if (!entry) return;
+          editingIndex = entry.index;
+          fill(entry.values || {});
+          clearErrors();
+          titleEl.textContent = form.editTitle || form.title;
+          bubble.querySelectorAll(".ai-ef-saved-item").forEach((el) => el.classList.remove("is-editing"));
+          button.closest(".ai-ef-saved-item")?.classList.add("is-editing");
+          formEl.querySelector(".ai-form-input")?.focus();
+        });
+      });
+      bubble.querySelector(".ai-pf-cancel").addEventListener("click", () => {
+        row?.remove();
+        this.events.emit("profile-form:cancelled");
+      });
+      formEl.addEventListener("input", (event) => {
+        const wrap = event.target.closest?.(".ai-pf-field");
+        if (wrap) {
+          wrap.classList.remove("has-error");
+          const err = wrap.querySelector(".ai-pf-error");
+          if (err) err.textContent = "";
+        }
+      });
+      formEl.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        clearErrors();
+        const entry = {};
+        for (const field of form.fields) {
+          const el = formEl.querySelector(`#${CSS.escape(id(field.key))}`);
+          if (!el) continue;
+          entry[field.key] = field.type === "checkbox" ? el.checked : el.value.trim();
+        }
+        let firstMissing = null;
+        for (const field of form.fields.filter((f) => f.required)) {
+          if (!entry[field.key]) {
+            const wrap = bubble.querySelector(`.ai-pf-field[data-key="${CSS.escape(field.key)}"]`);
+            wrap?.classList.add("has-error");
+            const err = wrap?.querySelector(".ai-pf-error");
+            if (err) err.textContent = `${field.label} is required.`;
+            firstMissing = firstMissing || wrap;
+          }
+        }
+        if (firstMissing) {
+          firstMissing.querySelector("input, textarea")?.focus();
+          return;
+        }
+        saveBtn.disabled = true;
+        saveBtn.textContent = "Saving\u2026";
+        try {
+          const result = await this._entryFormHandlers.save(form.section, entry, editingIndex);
+          row?.remove();
+          const what = form.section === "education" ? "Education" : "Work experience";
+          const verb = result?.isNew === false ? "updated" : "added";
+          const progress = Number.isFinite(result?.completion) ? ` Your profile is now **${result.completion}% complete**.` : "";
+          let rest = "";
+          if (result?.missingCount === 0) {
+            rest = "\n\n\u{1F389} Your profile is complete. Nice work!";
+          } else if (Array.isArray(result?.missing) && result.missing.length) {
+            rest = `
+
+Still missing: ${result.missing.join(", ")}. Say **complete my profile** to fill ${result.missing.length === 1 ? "it" : "them"} in.`;
+          }
+          this.postAssistantNote?.(`\u2705 ${what} ${verb}: ${result?.summary || ""}.${progress}${rest}`);
+          if (result?.missingCount === 0) this.updateProfileProgress(null);
+          this.events.emit("profile-form:saved", { changed: [form.section], missingCount: result?.missingCount ?? null });
+        } catch (error) {
+          const fields = error?.fields && typeof error.fields === "object" ? error.fields : null;
+          let shownInline = false;
+          if (fields) {
+            for (const [key, message] of Object.entries(fields)) {
+              const wrap = bubble.querySelector(`.ai-pf-field[data-key="${CSS.escape(key)}"]`);
+              if (wrap) {
+                wrap.classList.add("has-error");
+                const err = wrap.querySelector(".ai-pf-error");
+                if (err) err.textContent = String(message);
+                shownInline = true;
+              }
+            }
+          }
+          formError.textContent = fields?.form ? String(fields.form) : shownInline ? "Please fix the highlighted fields." : error?.message || "I couldn't save this just now. Please try again.";
+          saveBtn.disabled = false;
+          saveBtn.textContent = "Save";
+        }
+      });
+      this._scrollToBottom();
+      const firstEmpty = form.fields.find((field) => field.required && !(form.prefill || {})[field.key]);
+      formEl.querySelector(`#${CSS.escape(id((firstEmpty || form.fields[0]).key))}`)?.focus({ preventScroll: true });
     }
     /**
      * Dashboard: open the assistant after the user has spent `delayMs` on the
@@ -4342,6 +4556,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
         if (msg?.action && (msg.action === action || action.id && msg.action.id === action.id)) {
           msg.action._status = action._status;
           msg.action._statusMessage = action._statusMessage;
+          if (action._dismissed) msg.action._dismissed = true;
         }
       }
       this._persistState();
@@ -4478,13 +4693,17 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
       if (detailsHtml) {
         explanationText = explanationText.split("\n").filter((line) => !/^\s*[-*]\s+\*\*/.test(line)).join("\n").replace(/\s-\s+\*\*[\s\S]*?(?=(?:Choose|Click|Press|Reply)\b|$)/, " ").replace(/\n{3,}/g, "\n\n").trim();
       }
+      const plainText = (value) => String(value || "").replace(/[*_`#>]/g, "").replace(/\s+/g, " ").trim().toLowerCase();
+      const explanationStart = plainText(explanationText.split(/\r?\n/).find((line) => line.trim()) || "").slice(0, 60);
+      if (explanationStart && plainText(bubble.textContent).includes(explanationStart)) explanationText = "";
       const explanationHtml = explanationText ? parseMarkdown(explanationText) : "";
+      const isOwnProfileUpdate = /profile_update$/.test(String(action.formattedReview?.type || ""));
       const titleText = action.formattedReview?.title || action.title || "Review Action";
-      const confirmBtnLabel = action.formattedReview?.type === "job_creation" ? "Confirm &amp; Create" : isHirePoolAccountAction ? accountButtonLabel : "Confirm &amp; Execute";
+      const confirmBtnLabel = action.formattedReview?.type === "job_creation" ? "Confirm &amp; Create" : isHirePoolAccountAction ? accountButtonLabel : isOwnProfileUpdate ? "Save" : "Confirm";
       card.innerHTML = `
       <div class="ai-action-header">
         <span class="ai-action-badge">${badgeLabel}</span>
-        ${isHirePoolAccountAction ? "" : `<span class="ai-action-risk risk-${risk}">${risk === "destructive" ? "Destructive" : risk === "read" ? "Read" : "Write"}</span>`}
+        ${risk === "destructive" && !isHirePoolAccountAction ? '<span class="ai-action-risk risk-destructive">Can&#39;t be undone</span>' : ""}
         <span class="ai-action-title">${escapeHtml(titleText)}</span>
       </div>
       ${explanationHtml ? `<div class="ai-action-explanation">${explanationHtml}</div>` : ""}
@@ -4508,6 +4727,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
       const statusMsg = card.querySelector(".ai-action-status-msg");
       const controls = card.querySelector(".ai-action-controls");
       const acknowledgement = card.querySelector(".ai-action-acknowledge");
+      if (action._dismissed) return;
       if (action._status && action._status !== "pending") {
         if (controls) controls.style.display = "none";
         if (acknowledgement) acknowledgement.disabled = true;
@@ -4524,11 +4744,17 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
       if (btnEdit) {
         btnEdit.addEventListener("click", () => {
           const body = action.parameters?.body || action.arguments?.body || null;
-          if (/profile_update$/.test(String(action.formattedReview?.type || "")) && this._profileFormHandlers) {
+          if (isOwnProfileUpdate && this._profileFormHandlers) {
             btnCancel.click();
-            statusMsg.textContent = "Editing in the form below.";
-            action._statusMessage = "Editing in the form below.";
-            void this.showProfileForm("all", { overrides: body && typeof body === "object" ? body : null });
+            action._dismissed = true;
+            this._syncMessageActionState(action);
+            card.remove();
+            const section = Array.isArray(body?.education) ? "education" : Array.isArray(body?.work_experience) ? "work_experience" : null;
+            if (section && this._entryFormHandlers) {
+              void this.showEntryForm(section);
+            } else {
+              void this.showProfileForm("all", { overrides: body && typeof body === "object" ? body : null });
+            }
             return;
           }
           if (body && typeof body === "object" && (body.first_name || body.email)) {
@@ -4566,7 +4792,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
         btnCancel.disabled = true;
         statusMsg.style.display = "flex";
         statusMsg.className = "ai-action-status-msg executing";
-        statusMsg.textContent = isHirePoolAccountAction ? "Opening HirePool login..." : "Executing action in the host application...";
+        statusMsg.textContent = isHirePoolAccountAction ? "Opening HirePool login..." : isOwnProfileUpdate ? "Saving\u2026" : "Working on it\u2026";
         let handled = false;
         timeoutId = setTimeout(() => {
           if (!handled && executing) {
@@ -6140,6 +6366,13 @@ ${tag}` : tag;
           return;
         }
       }
+      if (this._entryFormHandlers && this.options?.surface === "app") {
+        const entryMatch = trimmed.match(/^\s*(?:please\s+)?(?:i\s+(?:want|would\s+like|need)\s+to\s+)?(?:add|update|edit|change|enter|fill\s+in|complete)\s+(?:my\s+|an?\s+|the\s+|new\s+)?(education(?:al)?(?:\s+details)?|qualifications?|degree|work\s*experience|experience|employment(?:\s+history)?|job\s+history)\b(?!\s+(?:level|years?|for|of)\b)/i);
+        if (entryMatch) {
+          const section = /educat|qualif|degree/i.test(entryMatch[1]) ? "education" : "work_experience";
+          if (await this.showEntryForm(section, { text: trimmed })) return;
+        }
+      }
       this._setGenerating(true);
       this.abortController = new AbortController();
       const stream = this.options.features?.streaming ?? true;
@@ -7398,2018 +7631,2018 @@ ${tag}` : tag;
   };
 
   // widget/src/styles.css
-  var styles_default = `:host {\r
-  all: initial;\r
-  display: block;\r
-  font-family: var(--font-sans), 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;\r
-  font-size: 14px;\r
-  line-height: 1.5;\r
-  color: #1f2937;\r
-  z-index: 2147483640;\r
-}\r
-\r
-*, *::before, *::after {\r
-  box-sizing: border-box;\r
-}\r
-\r
-.ai-widget-container {\r
-  --ai-primary: #a3e635;\r
-  --ai-primary-hover: #8ee055;\r
-  --ai-primary-contrast: #030712;\r
-  --ai-bg: #ffffff;\r
-  --ai-surface: #f8fafc;\r
-  --ai-surface-alt: #f1f5f9;\r
-  --ai-border: #e2e8f0;\r
-  --ai-text: #090d16;\r
-  --ai-text-muted: #64748b;\r
-  --ai-user-bubble: #a3e635;\r
-  --ai-user-text: #030712;\r
-  --ai-bot-bubble: #f1f5f9;\r
-  --ai-bot-text: #090d16;\r
-  --ai-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);\r
-  --ai-radius: 16px;\r
-  --ai-radius-sm: 8px;\r
-\r
-  position: fixed;\r
-  z-index: 2147483647;\r
-  pointer-events: none;\r
-}\r
-\r
-/* Dark Theme overrides */\r
-.ai-widget-container[data-theme="dark"] {\r
-  --ai-bg: #030712;\r
-  --ai-surface: #090d16;\r
-  --ai-surface-alt: #0f172a;\r
-  --ai-border: #1e293b;\r
-  --ai-text: #f8fafc;\r
-  --ai-text-muted: #94a3b8;\r
-  --ai-user-bubble: #a3e635;\r
-  --ai-user-text: #030712;\r
-  --ai-bot-bubble: #0f172a;\r
-  --ai-bot-text: #f8fafc;\r
-  --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);\r
-}\r
-\r
-/* Auto Theme Media Query */\r
-@media (prefers-color-scheme: dark) {\r
-  .ai-widget-container[data-theme="auto"] {\r
-    --ai-bg: #030712;\r
-    --ai-surface: #090d16;\r
-    --ai-surface-alt: #0f172a;\r
-    --ai-border: #1e293b;\r
-    --ai-text: #f8fafc;\r
-    --ai-text-muted: #94a3b8;\r
-    --ai-user-bubble: #a3e635;\r
-    --ai-user-text: #030712;\r
-    --ai-bot-bubble: #0f172a;\r
-    --ai-bot-text: #f8fafc;\r
-    --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);\r
-  }\r
-}\r
-\r
-/* Launcher Positions */\r
-.pos-bottom-right { bottom: 20px; right: 20px; }\r
-.pos-bottom-left { bottom: 20px; left: 20px; }\r
-.pos-top-right { top: 20px; right: 20px; }\r
-.pos-top-left { top: 20px; left: 20px; }\r
-\r
-/* Floating Launcher Button */\r
-.ai-launcher-btn {\r
-  pointer-events: auto;\r
-  position: relative;\r
-  width: 56px;\r
-  height: 56px;\r
-  padding: 0;\r
-  border-radius: 50%;\r
-  background: #0b0b0b;\r
-  color: var(--ai-primary);\r
-  border: 1.5px solid var(--ai-primary);\r
-  cursor: pointer;\r
-  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease;\r
-  outline: none;\r
-}\r
-\r
-.ai-launcher-btn:hover {\r
-  transform: scale(1.06);\r
-  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ai-primary) 18%, transparent), 0 8px 24px rgba(0, 0, 0, 0.4);\r
-}\r
-\r
-.ai-launcher-btn:active {\r
-  transform: scale(0.96);\r
-}\r
-\r
-.ai-launcher-btn:focus-visible {\r
-  outline: 3px solid var(--ai-primary);\r
-  outline-offset: 3px;\r
-}\r
-\r
-.ai-launcher-btn .icon-chat,\r
-.ai-launcher-btn .icon-close {\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-}\r
-\r
-.ai-launcher-btn svg {\r
-  width: 26px;\r
-  height: 26px;\r
-  transition: transform 0.25s ease, opacity 0.2s ease;\r
-}\r
-\r
-.ai-launcher-btn .icon-chat svg {\r
-  fill: currentColor;\r
-}\r
-\r
-.ai-launcher-btn:hover .icon-chat svg {\r
-  transform: translate(2px, -2px);\r
-}\r
-\r
-.ai-launcher-btn .icon-close svg {\r
-  width: 22px;\r
-  height: 22px;\r
-  fill: none;\r
-}\r
-\r
-.ai-launcher-btn:hover .icon-close svg {\r
-  transform: rotate(90deg);\r
-}\r
-\r
-.ai-launcher-btn .icon-close {\r
-  display: none;\r
-}\r
-\r
-.ai-widget-container.is-open .ai-launcher-btn .icon-chat {\r
-  display: none;\r
-}\r
-\r
-.ai-widget-container.is-open .ai-launcher-btn .icon-close {\r
-  display: flex;\r
-}\r
-\r
-/* ".ai" brand badge (from the hirepool.ai wordmark) */\r
-.ai-launcher-badge {\r
-  position: absolute;\r
-  right: -8px;\r
-  bottom: -4px;\r
-  min-width: 26px;\r
-  height: 17px;\r
-  padding: 0 6px;\r
-  border-radius: 9px;\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-  border: 2px solid var(--ai-bg);\r
-  font-size: 11px;\r
-  font-weight: 700;\r
-  line-height: 13px;\r
-  letter-spacing: 0.2px;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  pointer-events: none;\r
-  transition: transform 0.25s ease, opacity 0.2s ease;\r
-}\r
-\r
-.ai-launcher-btn:hover .ai-launcher-badge {\r
-  transform: scale(1.05);\r
-}\r
-\r
-.ai-widget-container.is-open .ai-launcher-badge {\r
-  opacity: 0;\r
-  transform: scale(0.6);\r
-}\r
-\r
-/* Phone greeting bubble (website bot) */\r
-.ai-teaser {\r
-  pointer-events: auto;\r
-  position: absolute;\r
-  bottom: 70px;\r
-  right: 0;\r
-  width: max-content;\r
-  max-width: min(260px, calc(100vw - 40px));\r
-  display: flex;\r
-  align-items: flex-start;\r
-  gap: 4px;\r
-  padding: 10px 6px 10px 14px;\r
-  background: var(--ai-bg);\r
-  color: var(--ai-text);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 14px 14px 4px 14px;\r
-  box-shadow: var(--ai-shadow);\r
-  animation: ai-teaser-in 0.25s ease;\r
-}\r
-\r
-.pos-bottom-left .ai-teaser { right: auto; left: 0; border-radius: 14px 14px 14px 4px; }\r
-.pos-top-right .ai-teaser,\r
-.pos-top-left .ai-teaser { bottom: auto; top: 70px; }\r
-\r
-.ai-teaser-text {\r
-  all: unset;\r
-  cursor: pointer;\r
-  font-size: 13.5px;\r
-  line-height: 1.45;\r
-  color: var(--ai-text);\r
-}\r
-\r
-.ai-teaser-text:focus-visible,\r
-.ai-teaser-close:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-  outline-offset: 2px;\r
-  border-radius: 4px;\r
-}\r
-\r
-.ai-teaser-close {\r
-  all: unset;\r
-  cursor: pointer;\r
-  flex-shrink: 0;\r
-  width: 22px;\r
-  height: 22px;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  color: var(--ai-text-muted);\r
-  border-radius: 50%;\r
-}\r
-\r
-.ai-teaser-close svg {\r
-  width: 12px;\r
-  height: 12px;\r
-}\r
-\r
-.ai-widget-container.is-open .ai-teaser {\r
-  display: none;\r
-}\r
-\r
-@keyframes ai-teaser-in {\r
-  from { opacity: 0; transform: translateY(6px); }\r
-  to { opacity: 1; transform: translateY(0); }\r
-}\r
-\r
-.ai-handoff-btn {\r
-  margin-top: 2px;\r
-}\r
-\r
-/* Chat Panel */\r
-.ai-panel {\r
-  pointer-events: auto;\r
-  position: absolute;\r
-  width: 380px;\r
-  height: 560px;\r
-  max-width: calc(100vw - 32px);\r
-  max-height: calc(100vh - 100px);\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: var(--ai-radius);\r
-  box-shadow: var(--ai-shadow);\r
-  display: flex;\r
-  flex-direction: column;\r
-  overflow: hidden;\r
-  opacity: 0;\r
-  transform: scale(0.95) translateY(10px);\r
-  transform-origin: bottom right;\r
-  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);\r
-  visibility: hidden;\r
-}\r
-\r
-/* Position-based origins and anchors */\r
-.pos-bottom-right .ai-panel { bottom: 70px; right: 0; transform-origin: bottom right; }\r
-.pos-bottom-left .ai-panel { bottom: 70px; left: 0; transform-origin: bottom left; }\r
-.pos-top-right .ai-panel { top: 70px; right: 0; transform-origin: top right; }\r
-.pos-top-left .ai-panel { top: 70px; left: 0; transform-origin: top left; }\r
-\r
-.ai-widget-container.is-open .ai-panel {\r
-  opacity: 1;\r
-  transform: scale(1) translateY(0);\r
-  visibility: visible;\r
-}\r
-\r
-/* Header */\r
-.ai-header {\r
-  padding: 12px 16px;\r
-  background: var(--ai-bg);\r
-  border-bottom: 1px solid var(--ai-border);\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: space-between;\r
-  flex-shrink: 0;\r
-  user-select: none;\r
-}\r
-\r
-.ai-header-info {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 10px;\r
-}\r
-\r
-.ai-avatar {\r
-  width: 32px;\r
-  height: 32px;\r
-  border-radius: 50%;\r
-  background: #0b0b0b;\r
-  color: var(--ai-primary);\r
-  border: 1.5px solid var(--ai-primary);\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  font-weight: 600;\r
-  font-size: 14px;\r
-  overflow: hidden;\r
-  flex-shrink: 0;\r
-}\r
-\r
-.ai-avatar-icon {\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-}\r
-\r
-.ai-avatar-icon svg {\r
-  width: 17px;\r
-  height: 17px;\r
-  fill: currentColor;\r
-}\r
-\r
-.ai-avatar img {\r
-  width: 100%;\r
-  height: 100%;\r
-  object-fit: cover;\r
-}\r
-\r
-.ai-header-titles {\r
-  display: flex;\r
-  flex-direction: column;\r
-}\r
-\r
-.ai-title {\r
-  font-size: 14px;\r
-  font-weight: 600;\r
-  color: var(--ai-text);\r
-  line-height: 1.2;\r
-}\r
-\r
-.ai-status {\r
-  font-size: 11px;\r
-  color: var(--ai-text-muted);\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 4px;\r
-}\r
-\r
-.ai-status-dot {\r
-  width: 7px;\r
-  height: 7px;\r
-  border-radius: 50%;\r
-  background: #10b981;\r
-}\r
-\r
-.ai-status-dot.busy {\r
-  background: #f59e0b;\r
-  animation: pulse-dot 1.5s infinite;\r
-}\r
-\r
-@keyframes pulse-dot {\r
-  0%, 100% { opacity: 1; transform: scale(1); }\r
-  50% { opacity: 0.5; transform: scale(1.2); }\r
-}\r
-\r
-.ai-header-actions {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 4px;\r
-}\r
-\r
-.ai-icon-btn {\r
-  background: transparent;\r
-  border: none;\r
-  color: var(--ai-text-muted);\r
-  width: 30px;\r
-  height: 30px;\r
-  border-radius: var(--ai-radius-sm);\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  cursor: pointer;\r
-  transition: background-color 0.15s ease, color 0.15s ease;\r
-  outline: none;\r
-}\r
-\r
-.ai-icon-btn:hover {\r
-  background: var(--ai-surface-alt);\r
-  color: var(--ai-text);\r
-}\r
-\r
-.ai-icon-btn:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-}\r
-\r
-.ai-icon-btn svg {\r
-  width: 16px;\r
-  height: 16px;\r
-  fill: currentColor;\r
-}\r
-\r
-/* Conversation Body */\r
-.ai-body {\r
-  flex: 1;\r
-  min-height: 0;\r
-  overflow-y: auto;\r
-  overflow-x: hidden;\r
-  padding: 16px;\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 14px;\r
-  background: var(--ai-bg);\r
-  scroll-behavior: smooth;\r
-}\r
-\r
-.ai-body::-webkit-scrollbar {\r
-  width: 5px;\r
-}\r
-\r
-.ai-body::-webkit-scrollbar-thumb {\r
-  background: var(--ai-border);\r
-  border-radius: 4px;\r
-}\r
-\r
-/* Welcome Box */\r
-.ai-welcome-box {\r
-  background: var(--ai-surface);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: var(--ai-radius-sm);\r
-  padding: 14px;\r
-  margin-bottom: 4px;\r
-}\r
-\r
-.ai-welcome-greeting {\r
-  font-size: 13.5px;\r
-  color: var(--ai-text);\r
-  margin-bottom: 12px;\r
-  line-height: 1.5;\r
-}\r
-\r
-.ai-suggested-prompts-label {\r
-  font-size: 11px;\r
-  font-weight: 600;\r
-  text-transform: uppercase;\r
-  letter-spacing: 0.5px;\r
-  color: var(--ai-text-muted);\r
-  margin-bottom: 8px;\r
-}\r
-\r
-.ai-prompts-list {\r
-  display: flex;\r
-  flex-wrap: wrap;\r
-  gap: 6px;\r
-}\r
-\r
-.ai-prompt-pill {\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 14px;\r
-  padding: 5px 10px;\r
-  font-size: 12px;\r
-  color: var(--ai-text);\r
-  cursor: pointer;\r
-  transition: all 0.15s ease;\r
-  text-align: left;\r
-  outline: none;\r
-}\r
-\r
-.ai-prompt-pill:hover {\r
-  background: var(--ai-primary);\r
-  border-color: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-  transform: translateY(-1px);\r
-}\r
-\r
-.ai-prompt-pill:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-}\r
-\r
-/* Message Rows */\r
-.ai-message-row {\r
-  display: flex;\r
-  flex-direction: column;\r
-  max-width: 88%;\r
-  min-width: 0;\r
-  animation: fadeInMsg 0.2s ease;\r
-}\r
-\r
-.ai-message-row.ai-signup-row {\r
-  width: 100%;\r
-  max-width: 100%;\r
-  min-width: 0;\r
-}\r
-\r
-@keyframes fadeInMsg {\r
-  from { opacity: 0; transform: translateY(4px); }\r
-  to { opacity: 1; transform: translateY(0); }\r
-}\r
-\r
-.ai-message-row.user {\r
-  align-self: flex-end;\r
-}\r
-\r
-.ai-message-row.assistant {\r
-  align-self: flex-start;\r
-}\r
-\r
-.ai-bubble {\r
-  padding: 10px 14px;\r
-  border-radius: 14px;\r
-  font-size: 13.5px;\r
-  line-height: 1.55;\r
-  word-break: break-word;\r
-}\r
-\r
-.ai-message-row.user .ai-bubble {\r
-  background: var(--ai-user-bubble);\r
-  color: var(--ai-user-text);\r
-  border-bottom-right-radius: 4px;\r
-}\r
-\r
-.ai-message-row.assistant .ai-bubble {\r
-  background: var(--ai-bot-bubble);\r
-  color: var(--ai-bot-text);\r
-  border-bottom-left-radius: 4px;\r
-  border: 1px solid var(--ai-border);\r
-}\r
-\r
-/* Assistant Bubble Markdown elements */\r
-.ai-bubble p {\r
-  margin: 0 0 8px 0;\r
-}\r
-\r
-/* The Markdown renderer leaves stray breaks between list items and empty paragraphs. */\r
-.ai-bubble ul > br,\r
-.ai-bubble ol > br,\r
-.ai-bubble p:empty {\r
-  display: none;\r
-}\r
-.ai-bubble p:last-child {\r
-  margin-bottom: 0;\r
-}\r
-\r
-.ai-bubble h2, .ai-bubble h3, .ai-bubble h4 {\r
-  margin: 10px 0 6px 0;\r
-  color: var(--ai-text);\r
-  font-weight: 600;\r
-}\r
-.ai-bubble h2 { font-size: 15px; }\r
-.ai-bubble h3 { font-size: 14px; }\r
-.ai-bubble h4 { font-size: 13.5px; }\r
-\r
-.ai-bubble ul, .ai-bubble ol {\r
-  margin: 6px 0 8px 18px;\r
-  padding: 0;\r
-}\r
-\r
-.ai-bubble li {\r
-  margin-bottom: 4px;\r
-}\r
-\r
-.ai-bubble blockquote {\r
-  margin: 8px 0;\r
-  padding: 4px 10px;\r
-  border-left: 3px solid var(--ai-primary);\r
-  background: var(--ai-surface);\r
-  color: var(--ai-text-muted);\r
-  font-style: italic;\r
-}\r
-\r
-.ai-bubble a {\r
-  color: var(--ai-primary);\r
-  text-decoration: underline;\r
-}\r
-\r
-.ai-bubble code.inline-code {\r
-  background: rgba(0, 0, 0, 0.08);\r
-  padding: 2px 5px;\r
-  border-radius: 4px;\r
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;\r
-  font-size: 12px;\r
-}\r
-\r
-[data-theme="dark"] .ai-bubble code.inline-code {\r
-  background: rgba(255, 255, 255, 0.12);\r
-}\r
-\r
-/* Code block container */\r
-.code-block-wrapper {\r
-  margin: 8px 0;\r
-  border-radius: 6px;\r
-  overflow: hidden;\r
-  background: #1e1e24;\r
-  color: #f8f8f2;\r
-  font-size: 12px;\r
-}\r
-\r
-.code-header {\r
-  display: flex;\r
-  justify-content: space-between;\r
-  align-items: center;\r
-  padding: 4px 10px;\r
-  background: #282a36;\r
-  color: #a0a0a0;\r
-  font-size: 11px;\r
-}\r
-\r
-.code-lang {\r
-  text-transform: uppercase;\r
-  font-weight: 600;\r
-}\r
-\r
-.copy-code-btn {\r
-  background: transparent;\r
-  border: 1px solid #44475a;\r
-  color: #f8f8f2;\r
-  border-radius: 4px;\r
-  padding: 2px 6px;\r
-  font-size: 10px;\r
-  cursor: pointer;\r
-}\r
-\r
-.copy-code-btn:hover {\r
-  background: #44475a;\r
-}\r
-\r
-.code-block-wrapper pre {\r
-  margin: 0;\r
-  padding: 10px;\r
-  overflow-x: auto;\r
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;\r
-}\r
-\r
-/* Message Meta & Action Bar */\r
-.ai-message-actions {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 8px;\r
-  margin-top: 4px;\r
-  font-size: 11px;\r
-  color: var(--ai-text-muted);\r
-}\r
-\r
-.ai-msg-action-btn {\r
-  background: transparent;\r
-  border: none;\r
-  color: var(--ai-text-muted);\r
-  font-size: 11px;\r
-  cursor: pointer;\r
-  display: inline-flex;\r
-  align-items: center;\r
-  gap: 3px;\r
-  padding: 2px 6px;\r
-  border-radius: 4px;\r
-  transition: all 0.15s ease;\r
-  outline: none;\r
-}\r
-\r
-.ai-msg-action-btn:hover {\r
-  background: var(--ai-surface-alt);\r
-  color: var(--ai-text);\r
-}\r
-\r
-.ai-msg-action-btn:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-}\r
-\r
-/* Typing / Streaming Indicator */\r
-.ai-streaming-indicator {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 4px;\r
-  padding: 8px 12px;\r
-  border-radius: 12px;\r
-  background: var(--ai-bot-bubble);\r
-  border: 1px solid var(--ai-border);\r
-  width: fit-content;\r
-  align-self: flex-start;\r
-}\r
-\r
-.ai-typing-dot {\r
-  width: 6px;\r
-  height: 6px;\r
-  border-radius: 50%;\r
-  background: var(--ai-text-muted);\r
-  animation: typingBounce 1.4s infinite ease-in-out both;\r
-}\r
-\r
-.ai-typing-dot:nth-child(1) { animation-delay: -0.32s; }\r
-.ai-typing-dot:nth-child(2) { animation-delay: -0.16s; }\r
-\r
-@keyframes typingBounce {\r
-  0%, 80%, 100% { transform: scale(0); opacity: 0.4; }\r
-  40% { transform: scale(1); opacity: 1; }\r
-}\r
-\r
-/* Error Banner */\r
-.ai-error-banner {\r
-  background: #fef2f2;\r
-  border: 1px solid #fecaca;\r
-  color: #991b1b;\r
-  border-radius: var(--ai-radius-sm);\r
-  padding: 8px 12px;\r
-  font-size: 12px;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: space-between;\r
-  gap: 8px;\r
-  margin: 4px 0;\r
-}\r
-\r
-[data-theme="dark"] .ai-error-banner {\r
-  background: #450a0a;\r
-  border-color: #7f1d1d;\r
-  color: #fca5a5;\r
-}\r
-\r
-.ai-error-retry-btn {\r
-  background: #dc2626;\r
-  color: white;\r
-  border: none;\r
-  padding: 3px 8px;\r
-  border-radius: 4px;\r
-  font-size: 11px;\r
-  font-weight: 500;\r
-  cursor: pointer;\r
-}\r
-\r
-/* Footer / Input Area */\r
-.ai-footer {\r
-  padding: 12px 14px;\r
-  background: var(--ai-bg);\r
-  border-top: 1px solid var(--ai-border);\r
-  flex-shrink: 0;\r
-}\r
-\r
-.ai-input-form {\r
-  display: flex;\r
-  align-items: flex-end;\r
-  gap: 8px;\r
-  background: var(--ai-surface);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 18px;\r
-  padding: 4px 6px 4px 12px;\r
-  transition: border-color 0.2s ease, box-shadow 0.2s ease;\r
-}\r
-\r
-.ai-input-form:focus-within {\r
-  border-color: var(--ai-primary);\r
-  box-shadow: 0 0 0 2px rgba(163, 230, 53, 0.25);\r
-}\r
-\r
-.ai-textarea {\r
-  flex: 1;\r
-  background: transparent;\r
-  border: none;\r
-  outline: none;\r
-  resize: none;\r
-  padding: 6px 0;\r
-  max-height: 120px;\r
-  min-height: 24px;\r
-  font-family: inherit;\r
-  font-size: 13.5px;\r
-  line-height: 1.4;\r
-  color: var(--ai-text);\r
-}\r
-\r
-.ai-textarea::placeholder {\r
-  color: var(--ai-text-muted);\r
-}\r
-\r
-.ai-send-btn, .ai-stop-btn {\r
-  width: 32px;\r
-  height: 32px;\r
-  border-radius: 50%;\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-  border: none;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  cursor: pointer;\r
-  flex-shrink: 0;\r
-  transition: background-color 0.15s ease, transform 0.1s ease;\r
-  outline: none;\r
-}\r
-\r
-.ai-send-btn:hover, .ai-stop-btn:hover {\r
-  background: var(--ai-primary-hover);\r
-}\r
-\r
-.ai-send-btn:disabled {\r
-  background: var(--ai-border);\r
-  color: var(--ai-text-muted);\r
-  cursor: not-allowed;\r
-}\r
-\r
-.ai-stop-btn {\r
-  background: #ef4444;\r
-}\r
-\r
-.ai-stop-btn:hover {\r
-  background: #dc2626;\r
-}\r
-\r
-.ai-send-btn svg, .ai-stop-btn svg {\r
-  width: 15px;\r
-  height: 15px;\r
-  fill: currentColor;\r
-}\r
-\r
-.ai-footer-note {\r
-  font-size: 10.5px;\r
-  color: var(--ai-text-muted);\r
-  text-align: center;\r
-  margin-top: 6px;\r
-}\r
-\r
-/* Reduced Motion */\r
-@media (prefers-reduced-motion: reduce) {\r
-  .ai-launcher-btn, .ai-launcher-btn svg, .ai-launcher-badge, .ai-teaser, .ai-panel, .ai-message-row, .ai-prompt-pill {\r
-    transition: none !important;\r
-    animation: none !important;\r
-  }\r
-}\r
-\r
-/* Mobile & Small Screen Adaptability */\r
-@media (max-width: 640px) {\r
-  .ai-panel {\r
-    width: 100vw !important;\r
-    height: 100% !important;\r
-    max-width: 100vw !important;\r
-    max-height: 100vh !important;\r
-    top: 0 !important;\r
-    left: 0 !important;\r
-    right: 0 !important;\r
-    bottom: 0 !important;\r
-    border-radius: 0 !important;\r
-    position: fixed !important;\r
-  }\r
-\r
-  .pos-bottom-right, .pos-bottom-left, .pos-top-right, .pos-top-left {\r
-    bottom: 16px;\r
-    right: 16px;\r
-    left: auto;\r
-    top: auto;\r
-  }\r
-}\r
-\r
-@media (max-width: 480px) {\r
-  .ai-body {\r
-    padding: 12px;\r
-  }\r
-\r
-  .ai-form-row {\r
-    grid-template-columns: minmax(0, 1fr);\r
-  }\r
-}\r
-\r
-/* Action Proposal Card */\r
-.ai-action-card {\r
-  margin-top: 10px;\r
-  width: 100%;\r
-  max-width: 100%;\r
-  min-width: 0;\r
-  box-sizing: border-box;\r
-  background: var(--ai-surface);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: var(--ai-radius-sm);\r
-  padding: 12px;\r
-  font-size: 12.5px;\r
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 8px;\r
-}\r
-\r
-[data-theme="dark"] .ai-action-card {\r
-  background: rgba(255, 255, 255, 0.04);\r
-  border-color: rgba(255, 255, 255, 0.12);\r
-}\r
-\r
-.ai-action-header {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 8px;\r
-}\r
-\r
-.ai-action-badge {\r
-  background: rgba(79, 70, 229, 0.12);\r
-  color: var(--ai-primary);\r
-  font-size: 10.5px;\r
-  font-weight: 600;\r
-  padding: 2px 7px;\r
-  border-radius: 10px;\r
-  text-transform: uppercase;\r
-  letter-spacing: 0.5px;\r
-}\r
-\r
-[data-theme="dark"] .ai-action-badge {\r
-  background: rgba(99, 102, 241, 0.25);\r
-  color: #818cf8;\r
-}\r
-\r
-.ai-action-title {\r
-  font-weight: 600;\r
-  color: var(--ai-text);\r
-  font-size: 13px;\r
-  flex: 1;\r
-}\r
-\r
-.ai-action-explanation {\r
-  margin: 0;\r
-  color: var(--ai-text-muted);\r
-  line-height: 1.4;\r
-  font-size: 12px;\r
-}\r
-\r
-.ai-action-details {\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  padding: 8px 10px;\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 4px;\r
-}\r
-\r
-[data-theme="dark"] .ai-action-details {\r
-  background: rgba(0, 0, 0, 0.2);\r
-}\r
-\r
-.ai-action-param-row {\r
-  display: flex;\r
-  gap: 8px;\r
-  font-size: 11.5px;\r
-}\r
-\r
-.ai-action-param-key {\r
-  font-weight: 500;\r
-  color: var(--ai-text-muted);\r
-  min-width: 80px;\r
-  flex-shrink: 0;\r
-}\r
-\r
-.ai-action-param-val {\r
-  color: var(--ai-text);\r
-  word-break: break-word;\r
-  font-weight: 500;\r
-}\r
-\r
-.ai-action-risk {\r
-  border-radius: 999px;\r
-  font-size: 10px;\r
-  font-weight: 600;\r
-  padding: 2px 7px;\r
-  text-transform: uppercase;\r
-}\r
-\r
-.ai-action-risk.risk-read {\r
-  background: rgba(16, 185, 129, 0.12);\r
-  color: #047857;\r
-}\r
-\r
-.ai-action-risk.risk-write {\r
-  background: rgba(79, 70, 229, 0.12);\r
-  color: var(--ai-primary);\r
-}\r
-\r
-.ai-action-risk.risk-destructive {\r
-  background: rgba(220, 38, 38, 0.12);\r
-  color: #b91c1c;\r
-}\r
-\r
-.ai-action-acknowledgement {\r
-  align-items: flex-start;\r
-  color: var(--ai-text-muted);\r
-  display: flex;\r
-  font-size: 11px;\r
-  gap: 7px;\r
-  line-height: 1.4;\r
-}\r
-\r
-.ai-action-acknowledgement input {\r
-  margin: 1px 0 0;\r
-}\r
-\r
-.ai-action-controls {\r
-  display: flex;\r
-  flex-wrap: wrap;\r
-  gap: 8px;\r
-  margin-top: 4px;\r
-  width: 100%;\r
-  min-width: 0;\r
-}\r
-\r
-.ai-btn-action-confirm, .ai-btn-action-cancel {\r
-  border-radius: 6px;\r
-  font-size: 12px;\r
-  font-weight: 500;\r
-  padding: 6px 12px;\r
-  cursor: pointer;\r
-  border: 1px solid transparent;\r
-  transition: all 0.15s ease;\r
-  min-width: 0;\r
-  white-space: normal;\r
-  text-align: center;\r
-}\r
-\r
-.ai-btn-action-confirm {\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-  flex: 1;\r
-}\r
-\r
-.ai-btn-action-confirm:hover:not(:disabled) {\r
-  background: var(--ai-primary-hover);\r
-}\r
-\r
-.ai-btn-action-confirm:disabled {\r
-  opacity: 0.6;\r
-  cursor: not-allowed;\r
-}\r
-\r
-.ai-btn-action-cancel {\r
-  background: transparent;\r
-  border-color: var(--ai-border);\r
-  color: var(--ai-text-muted);\r
-}\r
-\r
-.ai-btn-action-cancel:hover:not(:disabled) {\r
-  background: var(--ai-bg);\r
-  color: var(--ai-text);\r
-}\r
-\r
-.ai-action-status-msg {\r
-  border-radius: 6px;\r
-  padding: 6px 10px;\r
-  font-size: 11.5px;\r
-  font-weight: 500;\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 6px;\r
-}\r
-\r
-.ai-action-status-msg.executing {\r
-  background: #eff6ff;\r
-  color: #1d4ed8;\r
-  border: 1px solid #bfdbfe;\r
-}\r
-\r
-.ai-action-status-msg.success {\r
-  background: #f0fdf4;\r
-  color: #15803d;\r
-  border: 1px solid #bbf7d0;\r
-}\r
-\r
-.ai-action-status-msg.error {\r
-  background: #fef2f2;\r
-  color: #b91c1c;\r
-  border: 1px solid #fecaca;\r
-}\r
-\r
-.ai-action-status-msg.cancelled {\r
-  background: var(--ai-bg);\r
-  color: var(--ai-text-muted);\r
-  border: 1px solid var(--ai-border);\r
-}\r
-\r
-[data-theme="dark"] .ai-action-status-msg.executing {\r
-  background: #1e3a8a;\r
-  color: #93c5fd;\r
-  border-color: #2563eb;\r
-}\r
-\r
-[data-theme="dark"] .ai-action-status-msg.success {\r
-  background: #14532d;\r
-  color: #86efac;\r
-  border-color: #16a34a;\r
-}\r
-\r
-[data-theme="dark"] .ai-action-status-msg.error {\r
-  background: #7f1d1d;\r
-  color: #fca5a5;\r
-  border-color: #dc2626;\r
-}\r
-\r
-/* Document Attachment Button */\r
-.ai-attach-btn {\r
-  width: 32px;\r
-  height: 32px;\r
-  border-radius: 50%;\r
-  background: transparent;\r
-  color: var(--ai-text-muted);\r
-  border: none;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  cursor: pointer;\r
-  flex-shrink: 0;\r
-  transition: all 0.15s ease;\r
-  outline: none;\r
-  margin-right: 4px;\r
-}\r
-.ai-attach-btn:hover {\r
-  background: var(--ai-bg);\r
-  color: var(--ai-primary);\r
-}\r
-.ai-attach-btn svg {\r
-  width: 17px;\r
-  height: 17px;\r
-  fill: currentColor;\r
-}\r
-\r
-.ai-processing-state {\r
-  display: flex;\r
-  flex-wrap: wrap;\r
-  align-items: center;\r
-  gap: 8px;\r
-  font-size: 12.5px;\r
-  color: var(--ai-text);\r
-}\r
-.ai-document-consent {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 10px;\r
-  padding: 12px;\r
-  background: var(--ai-surface);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 8px;\r
-}\r
-.ai-document-consent h3,\r
-.ai-document-consent p {\r
-  margin: 0;\r
-}\r
-.ai-document-consent h3 {\r
-  font-size: 14px;\r
-  color: var(--ai-text);\r
-}\r
-.ai-document-consent p,\r
-.ai-document-consent-choice {\r
-  font-size: 12px;\r
-  color: var(--ai-text);\r
-}\r
-.ai-document-consent-choice {\r
-  display: flex;\r
-  align-items: flex-start;\r
-  gap: 8px;\r
-  cursor: pointer;\r
-}\r
-.ai-document-consent-choice input {\r
-  flex: 0 0 auto;\r
-  margin-top: 3px;\r
-}\r
-.ai-document-consent-controls {\r
-  display: flex;\r
-  gap: 8px;\r
-}\r
-.ai-document-consent-controls button,\r
-.ai-btn-document-cancel,\r
-.ai-btn-document-remove {\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  padding: 6px 10px;\r
-  color: var(--ai-text);\r
-  background: var(--ai-bg);\r
-  font: inherit;\r
-  cursor: pointer;\r
-}\r
-.ai-document-consent-controls .ai-btn-document-consent-accept {\r
-  border-color: var(--ai-primary);\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-}\r
-.ai-document-consent-controls button:disabled,\r
-.ai-btn-document-cancel:disabled,\r
-.ai-btn-document-remove:disabled {\r
-  opacity: 0.55;\r
-  cursor: not-allowed;\r
-}\r
-.ai-document-cancelled {\r
-  color: var(--ai-text-muted);\r
-}\r
-.ai-hirepool-resume-card {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 10px;\r
-  padding: 12px;\r
-  background: var(--ai-surface);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 8px;\r
-}\r
-.ai-hirepool-resume-card strong,\r
-.ai-hirepool-resume-card p {\r
-  margin: 0;\r
-  overflow-wrap: anywhere;\r
-}\r
-.ai-hirepool-resume-card strong {\r
-  color: var(--ai-text);\r
-  font-size: 13px;\r
-}\r
-.ai-hirepool-resume-card p {\r
-  color: var(--ai-text-muted);\r
-  font-size: 12px;\r
-}\r
-.ai-hirepool-resume-controls {\r
-  display: flex;\r
-  flex-wrap: wrap;\r
-  gap: 8px;\r
-}\r
-.ai-hirepool-resume-card button {\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  padding: 6px 10px;\r
-  color: var(--ai-text);\r
-  background: var(--ai-bg);\r
-  font: inherit;\r
-  cursor: pointer;\r
-}\r
-.ai-hirepool-resume-card .ai-btn-resume-confirm,\r
-.ai-hirepool-resume-card .ai-btn-resume-prepare {\r
-  border-color: var(--ai-primary);\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-}\r
-.ai-hirepool-resume-card button:disabled,\r
-.ai-attach-btn:disabled {\r
-  opacity: 0.55;\r
-  cursor: not-allowed;\r
-}\r
-.ai-spinner {\r
-  width: 16px;\r
-  height: 16px;\r
-  border: 2px solid rgba(79, 70, 229, 0.2);\r
-  border-top-color: var(--ai-primary);\r
-  border-radius: 50%;\r
-  animation: ai-spin 0.8s linear infinite;\r
-}\r
-@keyframes ai-spin {\r
-  to { transform: rotate(360deg); }\r
-}\r
-\r
-/* Generic Document Attachment Card */\r
-.ai-doc-card {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 8px;\r
-  background: var(--ai-surface);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 8px;\r
-  padding: 10px 12px;\r
-  margin: 4px 0;\r
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);\r
-}\r
-.ai-doc-header {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 10px;\r
-}\r
-.ai-doc-icon {\r
-  font-size: 22px;\r
-  line-height: 1;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-}\r
-.ai-doc-details {\r
-  flex: 1;\r
-  min-width: 0;\r
-}\r
-.ai-doc-title {\r
-  font-size: 13px;\r
-  font-weight: 600;\r
-  color: var(--ai-text);\r
-  white-space: nowrap;\r
-  overflow: hidden;\r
-  text-overflow: ellipsis;\r
-}\r
-.ai-doc-meta {\r
-  font-size: 11px;\r
-  color: var(--ai-text-muted);\r
-  margin-top: 2px;\r
-}\r
-.ai-doc-badge {\r
-  font-size: 10.5px;\r
-  font-weight: 500;\r
-  color: #059669;\r
-  background: rgba(16, 185, 129, 0.12);\r
-  padding: 3px 8px;\r
-  border-radius: 12px;\r
-  white-space: nowrap;\r
-}\r
-[data-theme="dark"] .ai-doc-badge {\r
-  color: #34d399;\r
-  background: rgba(16, 185, 129, 0.22);\r
-}\r
-.ai-doc-hint {\r
-  font-size: 12px;\r
-  color: var(--ai-text);\r
-  line-height: 1.4;\r
-  margin: 0;\r
-}\r
-\r
-/* In-Chat Signup & Onboarding Styles */\r
-.ai-signup-card {\r
-  border-left: 3px solid #16a34a;\r
-  width: 100%;\r
-  max-width: 100%;\r
-  min-width: 0;\r
-  box-sizing: border-box;\r
-}\r
-.ai-signup-role-options {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 8px;\r
-  margin: 8px 0;\r
-}\r
-.ai-role-btn {\r
-  display: flex;\r
-  flex-direction: column;\r
-  align-items: flex-start;\r
-  padding: 10px 12px;\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 8px;\r
-  background: var(--ai-bg);\r
-  cursor: pointer;\r
-  transition: all 0.2s ease;\r
-  text-align: left;\r
-}\r
-.ai-role-btn:hover {\r
-  border-color: #16a34a;\r
-  background: rgba(22, 163, 74, 0.05);\r
-}\r
-.ai-role-badge {\r
-  font-size: 10.5px;\r
-  font-weight: 600;\r
-  color: #16a34a;\r
-  text-transform: uppercase;\r
-  margin-bottom: 2px;\r
-}\r
-.ai-role-title {\r
-  font-size: 13.5px;\r
-  font-weight: 600;\r
-  color: var(--ai-text);\r
-}\r
-.ai-role-desc {\r
-  font-size: 11.5px;\r
-  color: var(--ai-text-muted);\r
-  margin-top: 2px;\r
-}\r
-.ai-signup-form,\r
-.ai-login-form {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 10px;\r
-  margin-top: 8px;\r
-  width: 100%;\r
-  min-width: 0;\r
-  max-width: 100%;\r
-  box-sizing: border-box;\r
-}\r
-\r
-.ai-profile-form {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 10px;\r
-  margin-top: 8px;\r
-  width: 100%;\r
-  min-width: 0;\r
-  max-width: 100%;\r
-  box-sizing: border-box;\r
-}\r
-\r
-.ai-login-card {\r
-  border-left: 3px solid #2563eb;\r
-  width: 100%;\r
-  max-width: 100%;\r
-  min-width: 0;\r
-  box-sizing: border-box;\r
-}\r
-\r
-.ai-login-secondary {\r
-  margin-top: 8px;\r
-  text-align: center;\r
-  width: 100%;\r
-}\r
-\r
-.ai-link-button {\r
-  background: none;\r
-  border: none;\r
-  color: #2563eb;\r
-  text-decoration: underline;\r
-  font-size: 11.5px;\r
-  cursor: pointer;\r
-  padding: 4px 6px;\r
-  font-family: inherit;\r
-  transition: color 0.15s ease;\r
-}\r
-\r
-.ai-link-button:hover {\r
-  color: #1d4ed8;\r
-}\r
-\r
-[data-theme="dark"] .ai-link-button {\r
-  color: #60a5fa;\r
-}\r
-\r
-[data-theme="dark"] .ai-link-button:hover {\r
-  color: #93c5fd;\r
-}\r
-.ai-form-row {\r
-  display: grid;\r
-  grid-template-columns: repeat(2, minmax(0, 1fr));\r
-  gap: 8px;\r
-  align-items: start;\r
-  width: 100%;\r
-  min-width: 0;\r
-  max-width: 100%;\r
-  box-sizing: border-box;\r
-}\r
-.ai-form-group {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 4px;\r
-  width: 100%;\r
-  min-width: 0;\r
-  max-width: 100%;\r
-  box-sizing: border-box;\r
-}\r
-.ai-form-label {\r
-  font-size: 11.5px;\r
-  font-weight: 500;\r
-  color: var(--ai-text);\r
-  line-height: 1.35;\r
-  overflow-wrap: break-word;\r
-  word-wrap: break-word;\r
-  min-width: 0;\r
-}\r
-.ai-form-input {\r
-  box-sizing: border-box;\r
-  width: 100%;\r
-  min-width: 0;\r
-  max-width: 100%;\r
-  margin: 0;\r
-  padding: 7px 10px;\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  font-size: 12.5px;\r
-  background: var(--ai-bg);\r
-  color: var(--ai-text);\r
-  outline: none;\r
-  font-family: inherit;\r
-}\r
-.ai-form-input:focus {\r
-  border-color: #16a34a;\r
-  box-shadow: 0 0 0 1px #16a34a;\r
-}\r
-.ai-password-wrapper {\r
-  position: relative;\r
-  display: flex;\r
-  align-items: center;\r
-}\r
-.ai-password-wrapper .ai-form-input {\r
-  width: 100%;\r
-  padding-right: 32px;\r
-}\r
-.ai-password-toggle {\r
-  position: absolute;\r
-  right: 8px;\r
-  background: none;\r
-  border: none;\r
-  cursor: pointer;\r
-  font-size: 14px;\r
-  color: var(--ai-text-muted);\r
-  padding: 2px;\r
-}\r
-.ai-form-input.ai-input-invalid {\r
-  border-color: #dc2626 !important;\r
-  background-color: #fef2f2 !important;\r
-}\r
-.ai-field-error {\r
-  color: #dc2626;\r
-  font-size: 11px;\r
-  margin-top: 2px;\r
-  line-height: 1.3;\r
-}\r
-\r
-/* Structured Action Review Cards & Tables */\r
-.ai-review-card-content {\r
-  margin: 8px 0;\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 8px;\r
-}\r
-.ai-review-table {\r
-  width: 100%;\r
-  border-collapse: collapse;\r
-  font-size: 12px;\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  overflow: hidden;\r
-}\r
-.ai-review-table tr {\r
-  border-bottom: 1px solid var(--ai-border);\r
-}\r
-.ai-review-table tr:last-child {\r
-  border-bottom: none;\r
-}\r
-.ai-review-key {\r
-  text-align: left;\r
-  padding: 6px 10px;\r
-  width: 38%;\r
-  font-weight: 600;\r
-  color: var(--ai-text-muted);\r
-  background: rgba(0, 0, 0, 0.02);\r
-  vertical-align: top;\r
-}\r
-.ai-review-val {\r
-  padding: 6px 10px;\r
-  color: var(--ai-text);\r
-  font-weight: 500;\r
-  vertical-align: top;\r
-}\r
-.ai-review-section {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 4px;\r
-}\r
-.ai-review-section-title {\r
-  font-size: 11px;\r
-  font-weight: 600;\r
-  text-transform: uppercase;\r
-  letter-spacing: 0.5px;\r
-  color: var(--ai-text-muted);\r
-}\r
-.ai-review-tags {\r
-  display: flex;\r
-  flex-wrap: wrap;\r
-  gap: 4px;\r
-}\r
-.ai-review-tag {\r
-  display: inline-block;\r
-  padding: 2px 8px;\r
-  border-radius: 12px;\r
-  font-size: 11px;\r
-  font-weight: 500;\r
-  background: #e0f2fe;\r
-  color: #0369a1;\r
-  border: 1px solid #bae6fd;\r
-}\r
-.ai-review-tag.preferred {\r
-  background: #f1f5f9;\r
-  color: #475569;\r
-  border-color: #cbd5e1;\r
-}\r
-.ai-review-desc {\r
-  font-size: 11.5px;\r
-  line-height: 1.4;\r
-  color: var(--ai-text);\r
-  padding: 6px 8px;\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  max-height: 120px;\r
-  overflow-y: auto;\r
-  white-space: pre-wrap;\r
-}\r
-.ai-btn-action-edit {\r
-  background: transparent;\r
-  color: var(--ai-text);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 6px;\r
-  padding: 6px 12px;\r
-  font-size: 12px;\r
-  cursor: pointer;\r
-  transition: all 0.15s ease;\r
-}\r
-.ai-btn-action-edit:hover {\r
-  background: rgba(0, 0, 0, 0.05);\r
-  border-color: var(--ai-text-muted);\r
-}\r
-.ai-verification-body {\r
-  padding: 4px 0;\r
-  width: 100%;\r
-  min-width: 0;\r
-  box-sizing: border-box;\r
-}\r
-.ai-role-btn {\r
-  width: 100%;\r
-  box-sizing: border-box;\r
-}\r
-/* Website bot: the welcome is a chat message, so the static welcome box is hidden */\r
-.ai-widget-container.ai-chat-welcome .ai-welcome-box {\r
-  display: none;\r
-}\r
-\r
-/* Website: role cards welcome */\r
-.ai-role-cards {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 8px;\r
-  margin-top: 10px;\r
-  width: 100%;\r
-}\r
-\r
-.ai-message-row.assistant:has(.ai-role-cards) {\r
-  flex-direction: column;\r
-  align-items: stretch;\r
-}\r
-\r
-.ai-message-row.assistant:has(.ai-role-cards) .ai-bubble {\r
-  align-self: flex-start;\r
-}\r
-\r
-.ai-role-card {\r
-  display: flex;\r
-  align-items: center;\r
-  gap: 12px;\r
-  width: 100%;\r
-  box-sizing: border-box;\r
-  padding: 11px 12px;\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-border);\r
-  border-radius: 12px;\r
-  cursor: pointer;\r
-  text-align: left;\r
-  font-family: inherit;\r
-  color: var(--ai-text);\r
-  transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.1s ease;\r
-}\r
-\r
-.ai-role-card:hover {\r
-  border-color: var(--ai-primary);\r
-  background: rgba(163, 230, 53, 0.08);\r
-}\r
-\r
-.ai-role-card:active { transform: scale(0.99); }\r
-\r
-.ai-role-card:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-  outline-offset: 2px;\r
-}\r
-\r
-.ai-role-card-icon {\r
-  width: 36px;\r
-  height: 36px;\r
-  border-radius: 10px;\r
-  background: rgba(163, 230, 53, 0.18);\r
-  color: #3f6212;\r
-  display: flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  flex-shrink: 0;\r
-}\r
-\r
-.ai-role-card-icon svg,\r
-.ai-role-card-chevron svg {\r
-  width: 18px;\r
-  height: 18px;\r
-  fill: currentColor;\r
-}\r
-\r
-.ai-role-card-text {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 2px;\r
-  flex: 1;\r
-  min-width: 0;\r
-}\r
-\r
-.ai-role-card-title {\r
-  font-size: 13.5px;\r
-  font-weight: 600;\r
-  line-height: 1.25;\r
-}\r
-\r
-.ai-role-card-subtitle {\r
-  font-size: 12px;\r
-  color: var(--ai-text-muted);\r
-  line-height: 1.3;\r
-}\r
-\r
-.ai-role-card-chevron {\r
-  color: var(--ai-text-muted);\r
-  display: flex;\r
-  flex-shrink: 0;\r
-}\r
-\r
-.ai-role-card:hover .ai-role-card-chevron { color: #3f6212; }\r
-\r
-[data-theme="dark"] .ai-role-card-icon,\r
-[data-theme="dark"] .ai-role-card:hover .ai-role-card-chevron { color: var(--ai-primary); }\r
-\r
-@media (prefers-color-scheme: dark) {\r
-  [data-theme="auto"] .ai-role-card-icon,\r
-  [data-theme="auto"] .ai-role-card:hover .ai-role-card-chevron { color: var(--ai-primary); }\r
-}\r
-\r
-/* Website look: dark branded header, pill input, no keyboard hint */\r
-.ai-theme-hirepool .ai-header {\r
-  background: #0f1720;\r
-  border-bottom-color: #0f1720;\r
-}\r
-\r
-.ai-theme-hirepool .ai-title { color: #ffffff; }\r
-\r
-.ai-theme-hirepool .ai-status { color: #a3e635; }\r
-\r
-.ai-theme-hirepool .ai-status-dot { background: #a3e635; }\r
-\r
-.ai-theme-hirepool .ai-header .ai-icon-btn { color: #cbd5e1; }\r
-\r
-.ai-theme-hirepool .ai-header .ai-icon-btn:hover {\r
-  color: #ffffff;\r
-  background: rgba(255, 255, 255, 0.08);\r
-}\r
-\r
-.ai-theme-hirepool .ai-input-form {\r
-  border-radius: 999px;\r
-  border: 1.5px solid var(--ai-primary);\r
-  align-items: center;\r
-}\r
-\r
-.ai-theme-hirepool .ai-textarea {\r
-  scrollbar-width: none;\r
-}\r
-\r
-.ai-theme-hirepool .ai-textarea::-webkit-scrollbar { display: none; }\r
-\r
-.ai-theme-hirepool .ai-footer-note { display: none; }\r
-\r
-/* Website: account buttons. A bar before the chat starts, header pills after. */\r
-.ai-auth-bar,\r
-.ai-header-signin,\r
-.ai-header-signup { display: none; }\r
-\r
-.ai-surface-website .ai-auth-bar {\r
-  display: flex;\r
-  gap: 8px;\r
-  padding: 0 14px 12px;\r
-  background: #0f1720;\r
-  flex-shrink: 0;\r
-}\r
-\r
-.ai-surface-website.ai-has-chat .ai-auth-bar { display: none; }\r
-\r
-.ai-auth-btn {\r
-  flex: 1;\r
-  display: inline-flex;\r
-  align-items: center;\r
-  justify-content: center;\r
-  gap: 6px;\r
-  height: 34px;\r
-  border-radius: 10px;\r
-  font-family: inherit;\r
-  font-size: 13px;\r
-  font-weight: 600;\r
-  cursor: pointer;\r
-  transition: background-color 0.15s ease, border-color 0.15s ease;\r
-}\r
-\r
-.ai-auth-btn svg { width: 16px; height: 16px; fill: currentColor; }\r
-\r
-.ai-auth-signin {\r
-  background: transparent;\r
-  color: #e6edf3;\r
-  border: 1px solid #3a4856;\r
-}\r
-\r
-.ai-auth-signin:hover { border-color: #a3e635; color: #ffffff; }\r
-\r
-.ai-auth-signup {\r
-  background: #a3e635;\r
-  color: #0f1720;\r
-  border: 1px solid #a3e635;\r
-}\r
-\r
-.ai-auth-signup:hover { background: #bef264; border-color: #bef264; }\r
-\r
-.ai-auth-btn:focus-visible,\r
-.ai-header-signin:focus-visible,\r
-.ai-header-signup:focus-visible {\r
-  outline: 2px solid #a3e635;\r
-  outline-offset: 2px;\r
-}\r
-\r
-.ai-surface-website.ai-has-chat .ai-header-signin,\r
-.ai-surface-website.ai-has-chat .ai-header-signup {\r
-  display: inline-flex;\r
-  align-items: center;\r
-  height: 26px;\r
-  padding: 0 10px;\r
-  border-radius: 999px;\r
-  font-family: inherit;\r
-  font-size: 12px;\r
-  font-weight: 600;\r
-  cursor: pointer;\r
-  white-space: nowrap;\r
-}\r
-\r
-.ai-surface-website .ai-header-signin {\r
-  background: transparent;\r
-  color: #cbd5e1;\r
-  border: none;\r
-}\r
-\r
-.ai-surface-website .ai-header-signin:hover { color: #ffffff; }\r
-\r
-.ai-surface-website .ai-header-signup {\r
-  background: #a3e635;\r
-  color: #0f1720;\r
-  border: none;\r
-  margin-right: 4px;\r
-}\r
-\r
-/* Website: roomier conversation with clear gaps between messages */\r
-.ai-theme-hirepool .ai-body {\r
-  background: #f6f8fa;\r
-  gap: 12px;\r
-}\r
-\r
-.ai-theme-hirepool .ai-messages-list {\r
-  display: flex;\r
-  flex-direction: column;\r
-  gap: 12px;\r
-}\r
-\r
-.ai-theme-hirepool .ai-message-row.assistant {\r
-  position: relative;\r
-  padding-left: 30px;\r
-  max-width: 100%;\r
-  box-sizing: border-box;\r
-  gap: 8px;\r
-}\r
-\r
-/* Small HirePool avatar beside the assistant's messages (once per run of messages) */\r
-.ai-theme-hirepool .ai-message-row.assistant::before {\r
-  content: '';\r
-  position: absolute;\r
-  left: 0;\r
-  top: 0;\r
-  width: 22px;\r
-  height: 22px;\r
-  border-radius: 50%;\r
-  background: #0b0b0b url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23a3e635' d='M7 3H21V17L16.5 12.5L7 22L2 17L11.5 7.5Z'/%3E%3C/svg%3E") center / 12px 12px no-repeat;\r
-  box-shadow: 0 0 0 1.5px #a3e635;\r
-}\r
-\r
-.ai-theme-hirepool .ai-message-row.assistant + .ai-message-row.assistant::before { visibility: hidden; }\r
-\r
-.ai-theme-hirepool .ai-message-row.assistant > .ai-bubble {\r
-  align-self: flex-start;\r
-  max-width: 88%;\r
-  background: #ffffff;\r
-  border: 1px solid #e3e8ee;\r
-  border-radius: 16px 16px 16px 4px;\r
-  padding: 10px 13px;\r
-  box-shadow: 0 1px 2px rgba(15, 23, 32, 0.04);\r
-}\r
-\r
-.ai-theme-hirepool .ai-message-row.user {\r
-  max-width: 82%;\r
-}\r
-\r
-.ai-theme-hirepool .ai-message-row.user .ai-bubble {\r
-  background: #a3e635;\r
-  color: #0f1720;\r
-  border-radius: 16px 16px 4px 16px;\r
-  padding: 8px 13px;\r
-  font-weight: 500;\r
-}\r
-\r
-.ai-theme-hirepool .ai-bubble ul,\r
-.ai-theme-hirepool .ai-bubble ol {\r
-  margin: 6px 0;\r
-  padding-left: 18px;\r
-}\r
-\r
-.ai-theme-hirepool .ai-bubble li { margin: 3px 0; }\r
-\r
-.ai-theme-hirepool .ai-bubble li p,\r
-.ai-theme-hirepool .ai-bubble li p:last-child { margin: 0; }\r
-\r
-/* Keep the header on one line next to the account pills */\r
-.ai-theme-hirepool .ai-header-info { min-width: 0; flex: 1; }\r
-\r
-.ai-theme-hirepool .ai-header-titles { min-width: 0; }\r
-\r
-.ai-theme-hirepool .ai-title {\r
-  white-space: nowrap;\r
-  overflow: hidden;\r
-  text-overflow: ellipsis;\r
-}\r
-\r
-.ai-theme-hirepool .ai-header-actions { flex-shrink: 0; }\r
-.ai-theme-hirepool .ai-bubble p { margin: 0 0 6px; }\r
-\r
-.ai-theme-hirepool .ai-bubble p:last-child { margin-bottom: 0; }\r
-\r
-.ai-theme-hirepool .ai-role-cards { margin-top: 0; }\r
-\r
-.ai-theme-hirepool .ai-quick-replies { margin-top: 0; }\r
-\r
-.ai-theme-hirepool .ai-quick-replies { gap: 8px; }\r
-\r
-/* Website: clearly visible secondary buttons under the cards */\r
-.ai-theme-hirepool .ai-quick-reply {\r
-  background: #ffffff;\r
-  border: 1.5px solid var(--ai-primary);\r
-  border-radius: 999px;\r
-  padding: 9px 16px;\r
-  font-size: 13.5px;\r
-  font-weight: 600;\r
-  color: #1f2933;\r
-  min-height: 38px;\r
-}\r
-\r
-.ai-theme-hirepool .ai-quick-reply:hover {\r
-  background: var(--ai-primary);\r
-  color: #0f1720;\r
-}\r
-\r
-/* Welcome bubble uses the full width above the cards */\r
-.ai-theme-hirepool .ai-message-row.assistant:has(.ai-role-cards) > .ai-bubble {\r
-  max-width: 100%;\r
-}\r
-\r
-.ai-msg-meta {\r
-  font-size: 11px;\r
-  color: #8a96a3;\r
-  margin-top: 4px;\r
-  padding-left: 2px;\r
-}\r
-\r
-.ai-theme-hirepool .ai-msg-meta { margin-top: -4px; }\r
-\r
-@media (prefers-reduced-motion: reduce) {\r
-  .ai-role-card { transition: none; }\r
-}\r
-\r
-/* Quick replies under the latest assistant message */\r
-.ai-quick-replies {\r
-  display: flex;\r
-  flex-wrap: wrap;\r
-  gap: 6px;\r
-  margin-top: 8px;\r
-}\r
-\r
-.ai-quick-reply {\r
-  background: var(--ai-bg);\r
-  border: 1px solid var(--ai-primary);\r
-  border-radius: 14px;\r
-  padding: 6px 12px;\r
-  font-size: 12.5px;\r
-  line-height: 1.3;\r
-  color: var(--ai-text);\r
-  cursor: pointer;\r
-  text-align: left;\r
-  transition: background-color 0.15s ease, color 0.15s ease;\r
-}\r
-\r
-.ai-quick-reply:hover {\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-}\r
-\r
-.ai-quick-reply:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-  outline-offset: 2px;\r
-}\r
-\r
-@media (prefers-reduced-motion: reduce) {\r
-  .ai-quick-reply { transition: none; }\r
-}\r
-\r
-/* Friendly error notices */\r
-.ai-error-banner {\r
-  line-height: 1.45;\r
-}\r
-\r
-.ai-error-retry-btn:disabled {\r
-  opacity: 0.5;\r
-  cursor: not-allowed;\r
-}\r
-\r
-.ai-error-login-link {\r
-  flex-shrink: 0;\r
-  padding: 4px 10px;\r
-  border-radius: var(--ai-radius-sm);\r
-  background: var(--ai-primary);\r
-  color: var(--ai-primary-contrast);\r
-  font-weight: 600;\r
-  text-decoration: none;\r
-}\r
-\r
-.ai-error-login-link:focus-visible {\r
-  outline: 2px solid var(--ai-primary);\r
-  outline-offset: 2px;\r
-}\r
+  var styles_default = `:host {
+  all: initial;
+  display: block;
+  font-family: var(--font-sans), 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: #1f2937;
+  z-index: 2147483640;
+}
+
+*, *::before, *::after {
+  box-sizing: border-box;
+}
+
+.ai-widget-container {
+  --ai-primary: #a3e635;
+  --ai-primary-hover: #8ee055;
+  --ai-primary-contrast: #030712;
+  --ai-bg: #ffffff;
+  --ai-surface: #f8fafc;
+  --ai-surface-alt: #f1f5f9;
+  --ai-border: #e2e8f0;
+  --ai-text: #090d16;
+  --ai-text-muted: #64748b;
+  --ai-user-bubble: #a3e635;
+  --ai-user-text: #030712;
+  --ai-bot-bubble: #f1f5f9;
+  --ai-bot-text: #090d16;
+  --ai-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  --ai-radius: 16px;
+  --ai-radius-sm: 8px;
+
+  position: fixed;
+  z-index: 2147483647;
+  pointer-events: none;
+}
+
+/* Dark Theme overrides */
+.ai-widget-container[data-theme="dark"] {
+  --ai-bg: #030712;
+  --ai-surface: #090d16;
+  --ai-surface-alt: #0f172a;
+  --ai-border: #1e293b;
+  --ai-text: #f8fafc;
+  --ai-text-muted: #94a3b8;
+  --ai-user-bubble: #a3e635;
+  --ai-user-text: #030712;
+  --ai-bot-bubble: #0f172a;
+  --ai-bot-text: #f8fafc;
+  --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);
+}
+
+/* Auto Theme Media Query */
+@media (prefers-color-scheme: dark) {
+  .ai-widget-container[data-theme="auto"] {
+    --ai-bg: #030712;
+    --ai-surface: #090d16;
+    --ai-surface-alt: #0f172a;
+    --ai-border: #1e293b;
+    --ai-text: #f8fafc;
+    --ai-text-muted: #94a3b8;
+    --ai-user-bubble: #a3e635;
+    --ai-user-text: #030712;
+    --ai-bot-bubble: #0f172a;
+    --ai-bot-text: #f8fafc;
+    --ai-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.6), 0 8px 10px -6px rgba(0, 0, 0, 0.6);
+  }
+}
+
+/* Launcher Positions */
+.pos-bottom-right { bottom: 20px; right: 20px; }
+.pos-bottom-left { bottom: 20px; left: 20px; }
+.pos-top-right { top: 20px; right: 20px; }
+.pos-top-left { top: 20px; left: 20px; }
+
+/* Floating Launcher Button */
+.ai-launcher-btn {
+  pointer-events: auto;
+  position: relative;
+  width: 56px;
+  height: 56px;
+  padding: 0;
+  border-radius: 50%;
+  background: #0b0b0b;
+  color: var(--ai-primary);
+  border: 1.5px solid var(--ai-primary);
+  cursor: pointer;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.35);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.25s cubic-bezier(0.34, 1.56, 0.64, 1), box-shadow 0.25s ease;
+  outline: none;
+}
+
+.ai-launcher-btn:hover {
+  transform: scale(1.06);
+  box-shadow: 0 0 0 4px color-mix(in srgb, var(--ai-primary) 18%, transparent), 0 8px 24px rgba(0, 0, 0, 0.4);
+}
+
+.ai-launcher-btn:active {
+  transform: scale(0.96);
+}
+
+.ai-launcher-btn:focus-visible {
+  outline: 3px solid var(--ai-primary);
+  outline-offset: 3px;
+}
+
+.ai-launcher-btn .icon-chat,
+.ai-launcher-btn .icon-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ai-launcher-btn svg {
+  width: 26px;
+  height: 26px;
+  transition: transform 0.25s ease, opacity 0.2s ease;
+}
+
+.ai-launcher-btn .icon-chat svg {
+  fill: currentColor;
+}
+
+.ai-launcher-btn:hover .icon-chat svg {
+  transform: translate(2px, -2px);
+}
+
+.ai-launcher-btn .icon-close svg {
+  width: 22px;
+  height: 22px;
+  fill: none;
+}
+
+.ai-launcher-btn:hover .icon-close svg {
+  transform: rotate(90deg);
+}
+
+.ai-launcher-btn .icon-close {
+  display: none;
+}
+
+.ai-widget-container.is-open .ai-launcher-btn .icon-chat {
+  display: none;
+}
+
+.ai-widget-container.is-open .ai-launcher-btn .icon-close {
+  display: flex;
+}
+
+/* ".ai" brand badge (from the hirepool.ai wordmark) */
+.ai-launcher-badge {
+  position: absolute;
+  right: -8px;
+  bottom: -4px;
+  min-width: 26px;
+  height: 17px;
+  padding: 0 6px;
+  border-radius: 9px;
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+  border: 2px solid var(--ai-bg);
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 13px;
+  letter-spacing: 0.2px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  transition: transform 0.25s ease, opacity 0.2s ease;
+}
+
+.ai-launcher-btn:hover .ai-launcher-badge {
+  transform: scale(1.05);
+}
+
+.ai-widget-container.is-open .ai-launcher-badge {
+  opacity: 0;
+  transform: scale(0.6);
+}
+
+/* Phone greeting bubble (website bot) */
+.ai-teaser {
+  pointer-events: auto;
+  position: absolute;
+  bottom: 70px;
+  right: 0;
+  width: max-content;
+  max-width: min(260px, calc(100vw - 40px));
+  display: flex;
+  align-items: flex-start;
+  gap: 4px;
+  padding: 10px 6px 10px 14px;
+  background: var(--ai-bg);
+  color: var(--ai-text);
+  border: 1px solid var(--ai-border);
+  border-radius: 14px 14px 4px 14px;
+  box-shadow: var(--ai-shadow);
+  animation: ai-teaser-in 0.25s ease;
+}
+
+.pos-bottom-left .ai-teaser { right: auto; left: 0; border-radius: 14px 14px 14px 4px; }
+.pos-top-right .ai-teaser,
+.pos-top-left .ai-teaser { bottom: auto; top: 70px; }
+
+.ai-teaser-text {
+  all: unset;
+  cursor: pointer;
+  font-size: 13.5px;
+  line-height: 1.45;
+  color: var(--ai-text);
+}
+
+.ai-teaser-text:focus-visible,
+.ai-teaser-close:focus-visible {
+  outline: 2px solid var(--ai-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.ai-teaser-close {
+  all: unset;
+  cursor: pointer;
+  flex-shrink: 0;
+  width: 22px;
+  height: 22px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ai-text-muted);
+  border-radius: 50%;
+}
+
+.ai-teaser-close svg {
+  width: 12px;
+  height: 12px;
+}
+
+.ai-widget-container.is-open .ai-teaser {
+  display: none;
+}
+
+@keyframes ai-teaser-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ai-handoff-btn {
+  margin-top: 2px;
+}
+
+/* Chat Panel */
+.ai-panel {
+  pointer-events: auto;
+  position: absolute;
+  width: 380px;
+  height: 560px;
+  max-width: calc(100vw - 32px);
+  max-height: calc(100vh - 100px);
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: var(--ai-radius);
+  box-shadow: var(--ai-shadow);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  opacity: 0;
+  transform: scale(0.95) translateY(10px);
+  transform-origin: bottom right;
+  transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+  visibility: hidden;
+}
+
+/* Position-based origins and anchors */
+.pos-bottom-right .ai-panel { bottom: 70px; right: 0; transform-origin: bottom right; }
+.pos-bottom-left .ai-panel { bottom: 70px; left: 0; transform-origin: bottom left; }
+.pos-top-right .ai-panel { top: 70px; right: 0; transform-origin: top right; }
+.pos-top-left .ai-panel { top: 70px; left: 0; transform-origin: top left; }
+
+.ai-widget-container.is-open .ai-panel {
+  opacity: 1;
+  transform: scale(1) translateY(0);
+  visibility: visible;
+}
+
+/* Header */
+.ai-header {
+  padding: 12px 16px;
+  background: var(--ai-bg);
+  border-bottom: 1px solid var(--ai-border);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-shrink: 0;
+  user-select: none;
+}
+
+.ai-header-info {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.ai-avatar {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: #0b0b0b;
+  color: var(--ai-primary);
+  border: 1.5px solid var(--ai-primary);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-weight: 600;
+  font-size: 14px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+.ai-avatar-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.ai-avatar-icon svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+}
+
+.ai-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.ai-header-titles {
+  display: flex;
+  flex-direction: column;
+}
+
+.ai-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ai-text);
+  line-height: 1.2;
+}
+
+.ai-status {
+  font-size: 11px;
+  color: var(--ai-text-muted);
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-status-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #10b981;
+}
+
+.ai-status-dot.busy {
+  background: #f59e0b;
+  animation: pulse-dot 1.5s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(1.2); }
+}
+
+.ai-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.ai-icon-btn {
+  background: transparent;
+  border: none;
+  color: var(--ai-text-muted);
+  width: 30px;
+  height: 30px;
+  border-radius: var(--ai-radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background-color 0.15s ease, color 0.15s ease;
+  outline: none;
+}
+
+.ai-icon-btn:hover {
+  background: var(--ai-surface-alt);
+  color: var(--ai-text);
+}
+
+.ai-icon-btn:focus-visible {
+  outline: 2px solid var(--ai-primary);
+}
+
+.ai-icon-btn svg {
+  width: 16px;
+  height: 16px;
+  fill: currentColor;
+}
+
+/* Conversation Body */
+.ai-body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  background: var(--ai-bg);
+  scroll-behavior: smooth;
+}
+
+.ai-body::-webkit-scrollbar {
+  width: 5px;
+}
+
+.ai-body::-webkit-scrollbar-thumb {
+  background: var(--ai-border);
+  border-radius: 4px;
+}
+
+/* Welcome Box */
+.ai-welcome-box {
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: var(--ai-radius-sm);
+  padding: 14px;
+  margin-bottom: 4px;
+}
+
+.ai-welcome-greeting {
+  font-size: 13.5px;
+  color: var(--ai-text);
+  margin-bottom: 12px;
+  line-height: 1.5;
+}
+
+.ai-suggested-prompts-label {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--ai-text-muted);
+  margin-bottom: 8px;
+}
+
+.ai-prompts-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.ai-prompt-pill {
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: 14px;
+  padding: 5px 10px;
+  font-size: 12px;
+  color: var(--ai-text);
+  cursor: pointer;
+  transition: all 0.15s ease;
+  text-align: left;
+  outline: none;
+}
+
+.ai-prompt-pill:hover {
+  background: var(--ai-primary);
+  border-color: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+  transform: translateY(-1px);
+}
+
+.ai-prompt-pill:focus-visible {
+  outline: 2px solid var(--ai-primary);
+}
+
+/* Message Rows */
+.ai-message-row {
+  display: flex;
+  flex-direction: column;
+  max-width: 88%;
+  min-width: 0;
+  animation: fadeInMsg 0.2s ease;
+}
+
+.ai-message-row.ai-signup-row {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
+@keyframes fadeInMsg {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.ai-message-row.user {
+  align-self: flex-end;
+}
+
+.ai-message-row.assistant {
+  align-self: flex-start;
+}
+
+.ai-bubble {
+  padding: 10px 14px;
+  border-radius: 14px;
+  font-size: 13.5px;
+  line-height: 1.55;
+  word-break: break-word;
+}
+
+.ai-message-row.user .ai-bubble {
+  background: var(--ai-user-bubble);
+  color: var(--ai-user-text);
+  border-bottom-right-radius: 4px;
+}
+
+.ai-message-row.assistant .ai-bubble {
+  background: var(--ai-bot-bubble);
+  color: var(--ai-bot-text);
+  border-bottom-left-radius: 4px;
+  border: 1px solid var(--ai-border);
+}
+
+/* Assistant Bubble Markdown elements */
+.ai-bubble p {
+  margin: 0 0 8px 0;
+}
+
+/* The Markdown renderer leaves stray breaks between list items and empty paragraphs. */
+.ai-bubble ul > br,
+.ai-bubble ol > br,
+.ai-bubble p:empty {
+  display: none;
+}
+.ai-bubble p:last-child {
+  margin-bottom: 0;
+}
+
+.ai-bubble h2, .ai-bubble h3, .ai-bubble h4 {
+  margin: 10px 0 6px 0;
+  color: var(--ai-text);
+  font-weight: 600;
+}
+.ai-bubble h2 { font-size: 15px; }
+.ai-bubble h3 { font-size: 14px; }
+.ai-bubble h4 { font-size: 13.5px; }
+
+.ai-bubble ul, .ai-bubble ol {
+  margin: 6px 0 8px 18px;
+  padding: 0;
+}
+
+.ai-bubble li {
+  margin-bottom: 4px;
+}
+
+.ai-bubble blockquote {
+  margin: 8px 0;
+  padding: 4px 10px;
+  border-left: 3px solid var(--ai-primary);
+  background: var(--ai-surface);
+  color: var(--ai-text-muted);
+  font-style: italic;
+}
+
+.ai-bubble a {
+  color: var(--ai-primary);
+  text-decoration: underline;
+}
+
+.ai-bubble code.inline-code {
+  background: rgba(0, 0, 0, 0.08);
+  padding: 2px 5px;
+  border-radius: 4px;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+}
+
+[data-theme="dark"] .ai-bubble code.inline-code {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Code block container */
+.code-block-wrapper {
+  margin: 8px 0;
+  border-radius: 6px;
+  overflow: hidden;
+  background: #1e1e24;
+  color: #f8f8f2;
+  font-size: 12px;
+}
+
+.code-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 4px 10px;
+  background: #282a36;
+  color: #a0a0a0;
+  font-size: 11px;
+}
+
+.code-lang {
+  text-transform: uppercase;
+  font-weight: 600;
+}
+
+.copy-code-btn {
+  background: transparent;
+  border: 1px solid #44475a;
+  color: #f8f8f2;
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 10px;
+  cursor: pointer;
+}
+
+.copy-code-btn:hover {
+  background: #44475a;
+}
+
+.code-block-wrapper pre {
+  margin: 0;
+  padding: 10px;
+  overflow-x: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+/* Message Meta & Action Bar */
+.ai-message-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ai-text-muted);
+}
+
+.ai-msg-action-btn {
+  background: transparent;
+  border: none;
+  color: var(--ai-text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 6px;
+  border-radius: 4px;
+  transition: all 0.15s ease;
+  outline: none;
+}
+
+.ai-msg-action-btn:hover {
+  background: var(--ai-surface-alt);
+  color: var(--ai-text);
+}
+
+.ai-msg-action-btn:focus-visible {
+  outline: 2px solid var(--ai-primary);
+}
+
+/* Typing / Streaming Indicator */
+.ai-streaming-indicator {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: 12px;
+  background: var(--ai-bot-bubble);
+  border: 1px solid var(--ai-border);
+  width: fit-content;
+  align-self: flex-start;
+}
+
+.ai-typing-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--ai-text-muted);
+  animation: typingBounce 1.4s infinite ease-in-out both;
+}
+
+.ai-typing-dot:nth-child(1) { animation-delay: -0.32s; }
+.ai-typing-dot:nth-child(2) { animation-delay: -0.16s; }
+
+@keyframes typingBounce {
+  0%, 80%, 100% { transform: scale(0); opacity: 0.4; }
+  40% { transform: scale(1); opacity: 1; }
+}
+
+/* Error Banner */
+.ai-error-banner {
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  color: #991b1b;
+  border-radius: var(--ai-radius-sm);
+  padding: 8px 12px;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: 4px 0;
+}
+
+[data-theme="dark"] .ai-error-banner {
+  background: #450a0a;
+  border-color: #7f1d1d;
+  color: #fca5a5;
+}
+
+.ai-error-retry-btn {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 3px 8px;
+  border-radius: 4px;
+  font-size: 11px;
+  font-weight: 500;
+  cursor: pointer;
+}
+
+/* Footer / Input Area */
+.ai-footer {
+  padding: 12px 14px;
+  background: var(--ai-bg);
+  border-top: 1px solid var(--ai-border);
+  flex-shrink: 0;
+}
+
+.ai-input-form {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: 18px;
+  padding: 4px 6px 4px 12px;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.ai-input-form:focus-within {
+  border-color: var(--ai-primary);
+  box-shadow: 0 0 0 2px rgba(163, 230, 53, 0.25);
+}
+
+.ai-textarea {
+  flex: 1;
+  background: transparent;
+  border: none;
+  outline: none;
+  resize: none;
+  padding: 6px 0;
+  max-height: 120px;
+  min-height: 24px;
+  font-family: inherit;
+  font-size: 13.5px;
+  line-height: 1.4;
+  color: var(--ai-text);
+}
+
+.ai-textarea::placeholder {
+  color: var(--ai-text-muted);
+}
+
+.ai-send-btn, .ai-stop-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: background-color 0.15s ease, transform 0.1s ease;
+  outline: none;
+}
+
+.ai-send-btn:hover, .ai-stop-btn:hover {
+  background: var(--ai-primary-hover);
+}
+
+.ai-send-btn:disabled {
+  background: var(--ai-border);
+  color: var(--ai-text-muted);
+  cursor: not-allowed;
+}
+
+.ai-stop-btn {
+  background: #ef4444;
+}
+
+.ai-stop-btn:hover {
+  background: #dc2626;
+}
+
+.ai-send-btn svg, .ai-stop-btn svg {
+  width: 15px;
+  height: 15px;
+  fill: currentColor;
+}
+
+.ai-footer-note {
+  font-size: 10.5px;
+  color: var(--ai-text-muted);
+  text-align: center;
+  margin-top: 6px;
+}
+
+/* Reduced Motion */
+@media (prefers-reduced-motion: reduce) {
+  .ai-launcher-btn, .ai-launcher-btn svg, .ai-launcher-badge, .ai-teaser, .ai-panel, .ai-message-row, .ai-prompt-pill {
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* Mobile & Small Screen Adaptability */
+@media (max-width: 640px) {
+  .ai-panel {
+    width: 100vw !important;
+    height: 100% !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    top: 0 !important;
+    left: 0 !important;
+    right: 0 !important;
+    bottom: 0 !important;
+    border-radius: 0 !important;
+    position: fixed !important;
+  }
+
+  .pos-bottom-right, .pos-bottom-left, .pos-top-right, .pos-top-left {
+    bottom: 16px;
+    right: 16px;
+    left: auto;
+    top: auto;
+  }
+}
+
+@media (max-width: 480px) {
+  .ai-body {
+    padding: 12px;
+  }
+
+  .ai-form-row {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+/* Action Proposal Card */
+.ai-action-card {
+  margin-top: 10px;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: var(--ai-radius-sm);
+  padding: 12px;
+  font-size: 12.5px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+[data-theme="dark"] .ai-action-card {
+  background: rgba(255, 255, 255, 0.04);
+  border-color: rgba(255, 255, 255, 0.12);
+}
+
+.ai-action-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.ai-action-badge {
+  background: rgba(79, 70, 229, 0.12);
+  color: var(--ai-primary);
+  font-size: 10.5px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+[data-theme="dark"] .ai-action-badge {
+  background: rgba(99, 102, 241, 0.25);
+  color: #818cf8;
+}
+
+.ai-action-title {
+  font-weight: 600;
+  color: var(--ai-text);
+  font-size: 13px;
+  flex: 1;
+}
+
+.ai-action-explanation {
+  margin: 0;
+  color: var(--ai-text-muted);
+  line-height: 1.4;
+  font-size: 12px;
+}
+
+.ai-action-details {
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+[data-theme="dark"] .ai-action-details {
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.ai-action-param-row {
+  display: flex;
+  gap: 8px;
+  font-size: 11.5px;
+}
+
+.ai-action-param-key {
+  font-weight: 500;
+  color: var(--ai-text-muted);
+  min-width: 80px;
+  flex-shrink: 0;
+}
+
+.ai-action-param-val {
+  color: var(--ai-text);
+  word-break: break-word;
+  font-weight: 500;
+}
+
+.ai-action-risk {
+  border-radius: 999px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 2px 7px;
+  text-transform: uppercase;
+}
+
+.ai-action-risk.risk-read {
+  background: rgba(16, 185, 129, 0.12);
+  color: #047857;
+}
+
+.ai-action-risk.risk-write {
+  background: rgba(79, 70, 229, 0.12);
+  color: var(--ai-primary);
+}
+
+.ai-action-risk.risk-destructive {
+  background: rgba(220, 38, 38, 0.12);
+  color: #b91c1c;
+}
+
+.ai-action-acknowledgement {
+  align-items: flex-start;
+  color: var(--ai-text-muted);
+  display: flex;
+  font-size: 11px;
+  gap: 7px;
+  line-height: 1.4;
+}
+
+.ai-action-acknowledgement input {
+  margin: 1px 0 0;
+}
+
+.ai-action-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+  width: 100%;
+  min-width: 0;
+}
+
+.ai-btn-action-confirm, .ai-btn-action-cancel {
+  border-radius: 6px;
+  font-size: 12px;
+  font-weight: 500;
+  padding: 6px 12px;
+  cursor: pointer;
+  border: 1px solid transparent;
+  transition: all 0.15s ease;
+  min-width: 0;
+  white-space: normal;
+  text-align: center;
+}
+
+.ai-btn-action-confirm {
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+  flex: 1;
+}
+
+.ai-btn-action-confirm:hover:not(:disabled) {
+  background: var(--ai-primary-hover);
+}
+
+.ai-btn-action-confirm:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.ai-btn-action-cancel {
+  background: transparent;
+  border-color: var(--ai-border);
+  color: var(--ai-text-muted);
+}
+
+.ai-btn-action-cancel:hover:not(:disabled) {
+  background: var(--ai-bg);
+  color: var(--ai-text);
+}
+
+.ai-action-status-msg {
+  border-radius: 6px;
+  padding: 6px 10px;
+  font-size: 11.5px;
+  font-weight: 500;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.ai-action-status-msg.executing {
+  background: #eff6ff;
+  color: #1d4ed8;
+  border: 1px solid #bfdbfe;
+}
+
+.ai-action-status-msg.success {
+  background: #f0fdf4;
+  color: #15803d;
+  border: 1px solid #bbf7d0;
+}
+
+.ai-action-status-msg.error {
+  background: #fef2f2;
+  color: #b91c1c;
+  border: 1px solid #fecaca;
+}
+
+.ai-action-status-msg.cancelled {
+  background: var(--ai-bg);
+  color: var(--ai-text-muted);
+  border: 1px solid var(--ai-border);
+}
+
+[data-theme="dark"] .ai-action-status-msg.executing {
+  background: #1e3a8a;
+  color: #93c5fd;
+  border-color: #2563eb;
+}
+
+[data-theme="dark"] .ai-action-status-msg.success {
+  background: #14532d;
+  color: #86efac;
+  border-color: #16a34a;
+}
+
+[data-theme="dark"] .ai-action-status-msg.error {
+  background: #7f1d1d;
+  color: #fca5a5;
+  border-color: #dc2626;
+}
+
+/* Document Attachment Button */
+.ai-attach-btn {
+  width: 32px;
+  height: 32px;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--ai-text-muted);
+  border: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex-shrink: 0;
+  transition: all 0.15s ease;
+  outline: none;
+  margin-right: 4px;
+}
+.ai-attach-btn:hover {
+  background: var(--ai-bg);
+  color: var(--ai-primary);
+}
+.ai-attach-btn svg {
+  width: 17px;
+  height: 17px;
+  fill: currentColor;
+}
+
+.ai-processing-state {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  font-size: 12.5px;
+  color: var(--ai-text);
+}
+.ai-document-consent {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: 8px;
+}
+.ai-document-consent h3,
+.ai-document-consent p {
+  margin: 0;
+}
+.ai-document-consent h3 {
+  font-size: 14px;
+  color: var(--ai-text);
+}
+.ai-document-consent p,
+.ai-document-consent-choice {
+  font-size: 12px;
+  color: var(--ai-text);
+}
+.ai-document-consent-choice {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+.ai-document-consent-choice input {
+  flex: 0 0 auto;
+  margin-top: 3px;
+}
+.ai-document-consent-controls {
+  display: flex;
+  gap: 8px;
+}
+.ai-document-consent-controls button,
+.ai-btn-document-cancel,
+.ai-btn-document-remove {
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--ai-text);
+  background: var(--ai-bg);
+  font: inherit;
+  cursor: pointer;
+}
+.ai-document-consent-controls .ai-btn-document-consent-accept {
+  border-color: var(--ai-primary);
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+}
+.ai-document-consent-controls button:disabled,
+.ai-btn-document-cancel:disabled,
+.ai-btn-document-remove:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.ai-document-cancelled {
+  color: var(--ai-text-muted);
+}
+.ai-hirepool-resume-card {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: 8px;
+}
+.ai-hirepool-resume-card strong,
+.ai-hirepool-resume-card p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.ai-hirepool-resume-card strong {
+  color: var(--ai-text);
+  font-size: 13px;
+}
+.ai-hirepool-resume-card p {
+  color: var(--ai-text-muted);
+  font-size: 12px;
+}
+.ai-hirepool-resume-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.ai-hirepool-resume-card button {
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  padding: 6px 10px;
+  color: var(--ai-text);
+  background: var(--ai-bg);
+  font: inherit;
+  cursor: pointer;
+}
+.ai-hirepool-resume-card .ai-btn-resume-confirm,
+.ai-hirepool-resume-card .ai-btn-resume-prepare {
+  border-color: var(--ai-primary);
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+}
+.ai-hirepool-resume-card button:disabled,
+.ai-attach-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.ai-spinner {
+  width: 16px;
+  height: 16px;
+  border: 2px solid rgba(79, 70, 229, 0.2);
+  border-top-color: var(--ai-primary);
+  border-radius: 50%;
+  animation: ai-spin 0.8s linear infinite;
+}
+@keyframes ai-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* Generic Document Attachment Card */
+.ai-doc-card {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  background: var(--ai-surface);
+  border: 1px solid var(--ai-border);
+  border-radius: 8px;
+  padding: 10px 12px;
+  margin: 4px 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.05);
+}
+.ai-doc-header {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.ai-doc-icon {
+  font-size: 22px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.ai-doc-details {
+  flex: 1;
+  min-width: 0;
+}
+.ai-doc-title {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ai-text);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ai-doc-meta {
+  font-size: 11px;
+  color: var(--ai-text-muted);
+  margin-top: 2px;
+}
+.ai-doc-badge {
+  font-size: 10.5px;
+  font-weight: 500;
+  color: #059669;
+  background: rgba(16, 185, 129, 0.12);
+  padding: 3px 8px;
+  border-radius: 12px;
+  white-space: nowrap;
+}
+[data-theme="dark"] .ai-doc-badge {
+  color: #34d399;
+  background: rgba(16, 185, 129, 0.22);
+}
+.ai-doc-hint {
+  font-size: 12px;
+  color: var(--ai-text);
+  line-height: 1.4;
+  margin: 0;
+}
+
+/* In-Chat Signup & Onboarding Styles */
+.ai-signup-card {
+  border-left: 3px solid #16a34a;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.ai-signup-role-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px 0;
+}
+.ai-role-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--ai-border);
+  border-radius: 8px;
+  background: var(--ai-bg);
+  cursor: pointer;
+  transition: all 0.2s ease;
+  text-align: left;
+}
+.ai-role-btn:hover {
+  border-color: #16a34a;
+  background: rgba(22, 163, 74, 0.05);
+}
+.ai-role-badge {
+  font-size: 10.5px;
+  font-weight: 600;
+  color: #16a34a;
+  text-transform: uppercase;
+  margin-bottom: 2px;
+}
+.ai-role-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  color: var(--ai-text);
+}
+.ai-role-desc {
+  font-size: 11.5px;
+  color: var(--ai-text-muted);
+  margin-top: 2px;
+}
+.ai-signup-form,
+.ai-login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.ai-profile-form {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-top: 8px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+
+.ai-login-card {
+  border-left: 3px solid #2563eb;
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+
+.ai-login-secondary {
+  margin-top: 8px;
+  text-align: center;
+  width: 100%;
+}
+
+.ai-link-button {
+  background: none;
+  border: none;
+  color: #2563eb;
+  text-decoration: underline;
+  font-size: 11.5px;
+  cursor: pointer;
+  padding: 4px 6px;
+  font-family: inherit;
+  transition: color 0.15s ease;
+}
+
+.ai-link-button:hover {
+  color: #1d4ed8;
+}
+
+[data-theme="dark"] .ai-link-button {
+  color: #60a5fa;
+}
+
+[data-theme="dark"] .ai-link-button:hover {
+  color: #93c5fd;
+}
+.ai-form-row {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  align-items: start;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.ai-form-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  box-sizing: border-box;
+}
+.ai-form-label {
+  font-size: 11.5px;
+  font-weight: 500;
+  color: var(--ai-text);
+  line-height: 1.35;
+  overflow-wrap: break-word;
+  word-wrap: break-word;
+  min-width: 0;
+}
+.ai-form-input {
+  box-sizing: border-box;
+  width: 100%;
+  min-width: 0;
+  max-width: 100%;
+  margin: 0;
+  padding: 7px 10px;
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  font-size: 12.5px;
+  background: var(--ai-bg);
+  color: var(--ai-text);
+  outline: none;
+  font-family: inherit;
+}
+.ai-form-input:focus {
+  border-color: #16a34a;
+  box-shadow: 0 0 0 1px #16a34a;
+}
+.ai-password-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+}
+.ai-password-wrapper .ai-form-input {
+  width: 100%;
+  padding-right: 32px;
+}
+.ai-password-toggle {
+  position: absolute;
+  right: 8px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  color: var(--ai-text-muted);
+  padding: 2px;
+}
+.ai-form-input.ai-input-invalid {
+  border-color: #dc2626 !important;
+  background-color: #fef2f2 !important;
+}
+.ai-field-error {
+  color: #dc2626;
+  font-size: 11px;
+  margin-top: 2px;
+  line-height: 1.3;
+}
+
+/* Structured Action Review Cards & Tables */
+.ai-review-card-content {
+  margin: 8px 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.ai-review-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.ai-review-table tr {
+  border-bottom: 1px solid var(--ai-border);
+}
+.ai-review-table tr:last-child {
+  border-bottom: none;
+}
+.ai-review-key {
+  text-align: left;
+  padding: 6px 10px;
+  width: 38%;
+  font-weight: 600;
+  color: var(--ai-text-muted);
+  background: rgba(0, 0, 0, 0.02);
+  vertical-align: top;
+}
+.ai-review-val {
+  padding: 6px 10px;
+  color: var(--ai-text);
+  font-weight: 500;
+  vertical-align: top;
+}
+.ai-review-section {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.ai-review-section-title {
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  color: var(--ai-text-muted);
+}
+.ai-review-tags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.ai-review-tag {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 500;
+  background: #e0f2fe;
+  color: #0369a1;
+  border: 1px solid #bae6fd;
+}
+.ai-review-tag.preferred {
+  background: #f1f5f9;
+  color: #475569;
+  border-color: #cbd5e1;
+}
+.ai-review-desc {
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--ai-text);
+  padding: 6px 8px;
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  max-height: 120px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+}
+.ai-btn-action-edit {
+  background: transparent;
+  color: var(--ai-text);
+  border: 1px solid var(--ai-border);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.ai-btn-action-edit:hover {
+  background: rgba(0, 0, 0, 0.05);
+  border-color: var(--ai-text-muted);
+}
+.ai-verification-body {
+  padding: 4px 0;
+  width: 100%;
+  min-width: 0;
+  box-sizing: border-box;
+}
+.ai-role-btn {
+  width: 100%;
+  box-sizing: border-box;
+}
+/* Website bot: the welcome is a chat message, so the static welcome box is hidden */
+.ai-widget-container.ai-chat-welcome .ai-welcome-box {
+  display: none;
+}
+
+/* Website: role cards welcome */
+.ai-role-cards {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-top: 10px;
+  width: 100%;
+}
+
+.ai-message-row.assistant:has(.ai-role-cards) {
+  flex-direction: column;
+  align-items: stretch;
+}
+
+.ai-message-row.assistant:has(.ai-role-cards) .ai-bubble {
+  align-self: flex-start;
+}
+
+.ai-role-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 11px 12px;
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-border);
+  border-radius: 12px;
+  cursor: pointer;
+  text-align: left;
+  font-family: inherit;
+  color: var(--ai-text);
+  transition: border-color 0.15s ease, background-color 0.15s ease, transform 0.1s ease;
+}
+
+.ai-role-card:hover {
+  border-color: var(--ai-primary);
+  background: rgba(163, 230, 53, 0.08);
+}
+
+.ai-role-card:active { transform: scale(0.99); }
+
+.ai-role-card:focus-visible {
+  outline: 2px solid var(--ai-primary);
+  outline-offset: 2px;
+}
+
+.ai-role-card-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  background: rgba(163, 230, 53, 0.18);
+  color: #3f6212;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+}
+
+.ai-role-card-icon svg,
+.ai-role-card-chevron svg {
+  width: 18px;
+  height: 18px;
+  fill: currentColor;
+}
+
+.ai-role-card-text {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+  min-width: 0;
+}
+
+.ai-role-card-title {
+  font-size: 13.5px;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.ai-role-card-subtitle {
+  font-size: 12px;
+  color: var(--ai-text-muted);
+  line-height: 1.3;
+}
+
+.ai-role-card-chevron {
+  color: var(--ai-text-muted);
+  display: flex;
+  flex-shrink: 0;
+}
+
+.ai-role-card:hover .ai-role-card-chevron { color: #3f6212; }
+
+[data-theme="dark"] .ai-role-card-icon,
+[data-theme="dark"] .ai-role-card:hover .ai-role-card-chevron { color: var(--ai-primary); }
+
+@media (prefers-color-scheme: dark) {
+  [data-theme="auto"] .ai-role-card-icon,
+  [data-theme="auto"] .ai-role-card:hover .ai-role-card-chevron { color: var(--ai-primary); }
+}
+
+/* Website look: dark branded header, pill input, no keyboard hint */
+.ai-theme-hirepool .ai-header {
+  background: #0f1720;
+  border-bottom-color: #0f1720;
+}
+
+.ai-theme-hirepool .ai-title { color: #ffffff; }
+
+.ai-theme-hirepool .ai-status { color: #a3e635; }
+
+.ai-theme-hirepool .ai-status-dot { background: #a3e635; }
+
+.ai-theme-hirepool .ai-header .ai-icon-btn { color: #cbd5e1; }
+
+.ai-theme-hirepool .ai-header .ai-icon-btn:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.ai-theme-hirepool .ai-input-form {
+  border-radius: 999px;
+  border: 1.5px solid var(--ai-primary);
+  align-items: center;
+}
+
+.ai-theme-hirepool .ai-textarea {
+  scrollbar-width: none;
+}
+
+.ai-theme-hirepool .ai-textarea::-webkit-scrollbar { display: none; }
+
+.ai-theme-hirepool .ai-footer-note { display: none; }
+
+/* Website: account buttons. A bar before the chat starts, header pills after. */
+.ai-auth-bar,
+.ai-header-signin,
+.ai-header-signup { display: none; }
+
+.ai-surface-website .ai-auth-bar {
+  display: flex;
+  gap: 8px;
+  padding: 0 14px 12px;
+  background: #0f1720;
+  flex-shrink: 0;
+}
+
+.ai-surface-website.ai-has-chat .ai-auth-bar { display: none; }
+
+.ai-auth-btn {
+  flex: 1;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 34px;
+  border-radius: 10px;
+  font-family: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.ai-auth-btn svg { width: 16px; height: 16px; fill: currentColor; }
+
+.ai-auth-signin {
+  background: transparent;
+  color: #e6edf3;
+  border: 1px solid #3a4856;
+}
+
+.ai-auth-signin:hover { border-color: #a3e635; color: #ffffff; }
+
+.ai-auth-signup {
+  background: #a3e635;
+  color: #0f1720;
+  border: 1px solid #a3e635;
+}
+
+.ai-auth-signup:hover { background: #bef264; border-color: #bef264; }
+
+.ai-auth-btn:focus-visible,
+.ai-header-signin:focus-visible,
+.ai-header-signup:focus-visible {
+  outline: 2px solid #a3e635;
+  outline-offset: 2px;
+}
+
+.ai-surface-website.ai-has-chat .ai-header-signin,
+.ai-surface-website.ai-has-chat .ai-header-signup {
+  display: inline-flex;
+  align-items: center;
+  height: 26px;
+  padding: 0 10px;
+  border-radius: 999px;
+  font-family: inherit;
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.ai-surface-website .ai-header-signin {
+  background: transparent;
+  color: #cbd5e1;
+  border: none;
+}
+
+.ai-surface-website .ai-header-signin:hover { color: #ffffff; }
+
+.ai-surface-website .ai-header-signup {
+  background: #a3e635;
+  color: #0f1720;
+  border: none;
+  margin-right: 4px;
+}
+
+/* Website: roomier conversation with clear gaps between messages */
+.ai-theme-hirepool .ai-body {
+  background: #f6f8fa;
+  gap: 12px;
+}
+
+.ai-theme-hirepool .ai-messages-list {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.ai-theme-hirepool .ai-message-row.assistant {
+  position: relative;
+  padding-left: 30px;
+  max-width: 100%;
+  box-sizing: border-box;
+  gap: 8px;
+}
+
+/* Small HirePool avatar beside the assistant's messages (once per run of messages) */
+.ai-theme-hirepool .ai-message-row.assistant::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 0;
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: #0b0b0b url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%23a3e635' d='M7 3H21V17L16.5 12.5L7 22L2 17L11.5 7.5Z'/%3E%3C/svg%3E") center / 12px 12px no-repeat;
+  box-shadow: 0 0 0 1.5px #a3e635;
+}
+
+.ai-theme-hirepool .ai-message-row.assistant + .ai-message-row.assistant::before { visibility: hidden; }
+
+.ai-theme-hirepool .ai-message-row.assistant > .ai-bubble {
+  align-self: flex-start;
+  max-width: 88%;
+  background: #ffffff;
+  border: 1px solid #e3e8ee;
+  border-radius: 16px 16px 16px 4px;
+  padding: 10px 13px;
+  box-shadow: 0 1px 2px rgba(15, 23, 32, 0.04);
+}
+
+.ai-theme-hirepool .ai-message-row.user {
+  max-width: 82%;
+}
+
+.ai-theme-hirepool .ai-message-row.user .ai-bubble {
+  background: #a3e635;
+  color: #0f1720;
+  border-radius: 16px 16px 4px 16px;
+  padding: 8px 13px;
+  font-weight: 500;
+}
+
+.ai-theme-hirepool .ai-bubble ul,
+.ai-theme-hirepool .ai-bubble ol {
+  margin: 6px 0;
+  padding-left: 18px;
+}
+
+.ai-theme-hirepool .ai-bubble li { margin: 3px 0; }
+
+.ai-theme-hirepool .ai-bubble li p,
+.ai-theme-hirepool .ai-bubble li p:last-child { margin: 0; }
+
+/* Keep the header on one line next to the account pills */
+.ai-theme-hirepool .ai-header-info { min-width: 0; flex: 1; }
+
+.ai-theme-hirepool .ai-header-titles { min-width: 0; }
+
+.ai-theme-hirepool .ai-title {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.ai-theme-hirepool .ai-header-actions { flex-shrink: 0; }
+.ai-theme-hirepool .ai-bubble p { margin: 0 0 6px; }
+
+.ai-theme-hirepool .ai-bubble p:last-child { margin-bottom: 0; }
+
+.ai-theme-hirepool .ai-role-cards { margin-top: 0; }
+
+.ai-theme-hirepool .ai-quick-replies { margin-top: 0; }
+
+.ai-theme-hirepool .ai-quick-replies { gap: 8px; }
+
+/* Website: clearly visible secondary buttons under the cards */
+.ai-theme-hirepool .ai-quick-reply {
+  background: #ffffff;
+  border: 1.5px solid var(--ai-primary);
+  border-radius: 999px;
+  padding: 9px 16px;
+  font-size: 13.5px;
+  font-weight: 600;
+  color: #1f2933;
+  min-height: 38px;
+}
+
+.ai-theme-hirepool .ai-quick-reply:hover {
+  background: var(--ai-primary);
+  color: #0f1720;
+}
+
+/* Welcome bubble uses the full width above the cards */
+.ai-theme-hirepool .ai-message-row.assistant:has(.ai-role-cards) > .ai-bubble {
+  max-width: 100%;
+}
+
+.ai-msg-meta {
+  font-size: 11px;
+  color: #8a96a3;
+  margin-top: 4px;
+  padding-left: 2px;
+}
+
+.ai-theme-hirepool .ai-msg-meta { margin-top: -4px; }
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-role-card { transition: none; }
+}
+
+/* Quick replies under the latest assistant message */
+.ai-quick-replies {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 8px;
+}
+
+.ai-quick-reply {
+  background: var(--ai-bg);
+  border: 1px solid var(--ai-primary);
+  border-radius: 14px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  line-height: 1.3;
+  color: var(--ai-text);
+  cursor: pointer;
+  text-align: left;
+  transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.ai-quick-reply:hover {
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+}
+
+.ai-quick-reply:focus-visible {
+  outline: 2px solid var(--ai-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ai-quick-reply { transition: none; }
+}
+
+/* Friendly error notices */
+.ai-error-banner {
+  line-height: 1.45;
+}
+
+.ai-error-retry-btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.ai-error-login-link {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  border-radius: var(--ai-radius-sm);
+  background: var(--ai-primary);
+  color: var(--ai-primary-contrast);
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.ai-error-login-link:focus-visible {
+  outline: 2px solid var(--ai-primary);
+  outline-offset: 2px;
+}
 
 /* ===== HirePool theme: dashboard welcome box, reminder card, profile form ===== */
 .ai-theme-hirepool .ai-welcome-box {
@@ -9857,6 +10090,99 @@ ${tag}` : tag;
   flex-wrap: wrap;
   gap: 8px;
 }
+
+/* Status line icons stay text-sized (the success tick was drawn huge). */
+.ai-action-status-msg svg {
+  flex: none;
+  height: 14px;
+  width: 14px;
+}
+
+.ai-review-val {
+  white-space: pre-line;
+}
+
+/* Candidates: one education / work-experience entry in a small form. */
+.ai-ef-grid {
+  display: grid;
+  gap: 10px;
+  grid-template-columns: 1fr 1fr;
+}
+
+.ai-ef-grid > .ai-pf-field {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+
+.ai-ef-grid > .ai-pf-field.ai-ef-half {
+  grid-column: auto;
+}
+
+.ai-ef-grid input[type="month"] {
+  min-width: 0;
+  width: 100%;
+}
+
+.ai-ef-req {
+  color: #dc2626;
+}
+
+.ai-ef-check-label {
+  align-items: center;
+  cursor: pointer;
+  display: inline-flex;
+  gap: 8px;
+}
+
+.ai-ef-saved {
+  background: var(--ai-surface-alt);
+  border-radius: var(--ai-radius-sm);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-bottom: 10px;
+  padding: 8px 10px;
+}
+
+.ai-ef-saved-item {
+  align-items: center;
+  display: flex;
+  gap: 8px;
+  justify-content: space-between;
+}
+
+.ai-ef-saved-item.is-editing .ai-ef-saved-text {
+  font-weight: 600;
+}
+
+.ai-ef-saved-text {
+  color: var(--ai-text);
+  font-size: 12.5px;
+  line-height: 1.4;
+  min-width: 0;
+}
+
+.ai-ef-edit {
+  background: none;
+  border: 1px solid var(--ai-border);
+  border-radius: 999px;
+  color: var(--ai-text);
+  cursor: pointer;
+  flex: none;
+  font: inherit;
+  font-size: 12px;
+  padding: 2px 10px;
+}
+
+.ai-ef-edit:hover {
+  border-color: #84cc16;
+}
+
+@media (max-width: 360px) {
+  .ai-ef-grid {
+    grid-template-columns: 1fr;
+  }
+}
 `;
 
   // widget/src/hirepool-app-session.js
@@ -10266,6 +10592,10 @@ ${tag}` : tag;
         this.widgetUI.setProfileFormHandlers?.({
           load: (mode) => this._profileFormRequest("GET", mode),
           save: (values) => this._profileFormRequest("POST", null, values)
+        });
+        this.widgetUI.setEntryFormHandlers?.({
+          prepare: (section, text) => this._assistantRequest("POST", "profile-entry/prepare", { section, text: text || "" }),
+          save: (section, entry, index) => this._assistantRequest("POST", "profile-entry", { section, entry, index: Number.isInteger(index) ? index : null })
         });
         this.widgetUI.setAssistantHandlers?.({
           addCandidate: (candidate) => this._assistantRequest("POST", "bench-candidates", { candidate }, { acceptStatuses: [422] }),

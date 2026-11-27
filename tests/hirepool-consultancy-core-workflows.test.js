@@ -785,7 +785,7 @@ test('Consultancy 12: Regression - "Add a new candidate", comma-separated detail
     authUser
   });
   assert.equal(turn3.handled, true);
-  assert.match(turn3.text, /Confirm & Execute/i);
+  assert.match(turn3.text, /\*\*Confirm\*\*/i);
   assert.ok(turn3.hostAction);
 });
 

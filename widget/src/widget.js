@@ -1148,6 +1148,13 @@ export class AssistantWidgetUI {
       bubble.innerHTML = `<div class="ai-profile-form-error">I couldn't load your profile just now. Please try again in a moment.</div>`;
       return false;
     }
+    // Only education / work experience left: go straight to that small form.
+    const missingSections = (form.chatSections || []).filter(section => section.missing);
+    if (mode === 'missing' && form.fields.length === 0 && missingSections.length && this._entryFormHandlers) {
+      row.remove();
+      const opened = await this.showEntryForm(missingSections[0].key);
+      if (opened) return true;
+    }
     if (mode === 'missing' && form.fields.length === 0 && !(form.chatSections || []).length) {
       row.remove();
       this.updateProfileProgress(null);
@@ -1211,8 +1218,8 @@ export class AssistantWidgetUI {
           </div>`).join('')}
         ${chatSections.length ? `
           <div class="ai-pf-chat-sections">
-            <div class="ai-pf-hint">These need a few details each, so we'll add them together in chat:</div>
-            ${chatSections.map(s => `<button type="button" class="ai-pf-chat-btn" data-prompt="${escapeHtml(s.prompt)}">${escapeHtml(s.missing ? `Add ${s.label.toLowerCase()}` : `Edit ${s.label.toLowerCase()}`)}</button>`).join('')}
+            <div class="ai-pf-hint">${this._entryFormHandlers ? 'Each of these has its own short form:' : "These need a few details each, so we'll add them together in chat:"}</div>
+            ${chatSections.map(s => `<button type="button" class="ai-pf-chat-btn" data-section="${escapeHtml(s.key)}" data-prompt="${escapeHtml(s.prompt)}">${escapeHtml(s.missing ? `Add ${s.label.toLowerCase()}` : `Edit ${s.label.toLowerCase()}`)}</button>`).join('')}
           </div>` : ''}
         <div class="ai-pf-form-error" role="alert"></div>
         <div class="ai-pf-actions">
@@ -1243,8 +1250,9 @@ export class AssistantWidgetUI {
       });
     });
     bubble.querySelectorAll('.ai-pf-chat-btn').forEach(button => {
-      button.addEventListener('click', () => {
+      button.addEventListener('click', async () => {
         row?.remove();
+        if (this._entryFormHandlers && button.dataset.section && await this.showEntryForm(button.dataset.section)) return;
         void this.sendMessage(button.dataset.prompt);
       });
     });
@@ -1317,6 +1325,226 @@ export class AssistantWidgetUI {
       }
     });
     this._scrollToBottom();
+  }
+
+  /** Candidates: how to load and save one education / work-experience entry (set by the SDK). */
+  setEntryFormHandlers(handlers) {
+    this._entryFormHandlers = handlers && typeof handlers.prepare === 'function' && typeof handlers.save === 'function'
+      ? handlers
+      : null;
+  }
+
+  /**
+   * Candidates: a small form for one education or work-experience entry, pre-filled with
+   * whatever the user already typed. Returns false (and shows nothing) when the account
+   * cannot use it, so the message goes to the chat as usual.
+   */
+  async showEntryForm(section, { text = '' } = {}) {
+    if (!this._entryFormHandlers || !this.messagesList) return false;
+    if (!['education', 'work_experience'].includes(section)) return false;
+    if (!this.isOpen) this.open({ focus: false });
+    this.messagesList.querySelectorAll('.ai-profile-form-row, .ai-nudge-row').forEach(el => el.remove());
+    this._clearQuickReplies();
+
+    const row = document.createElement('div');
+    row.className = 'ai-message-row assistant ai-signup-row ai-profile-form-row ai-entry-form-row';
+    const bubble = document.createElement('div');
+    bubble.className = 'ai-bubble ai-profile-form-card';
+    bubble.innerHTML = '<div class="ai-profile-form-loading">Opening the form…</div>';
+    row.appendChild(bubble);
+    this.messagesList.appendChild(row);
+    this._scrollToBottom();
+
+    let form;
+    try {
+      form = await this._entryFormHandlers.prepare(section, text);
+    } catch (error) {
+      if (error?.status === 403 || error?.status === 400) {
+        row.remove();
+        return false;
+      }
+      bubble.innerHTML = `<div class="ai-profile-form-error">${escapeHtml(error?.message || "I couldn't open the form just now. Please try again in a moment.")}</div>`;
+      return true;
+    }
+    if (!form || !Array.isArray(form.fields)) {
+      row.remove();
+      return false;
+    }
+    this._renderEntryForm(bubble, form);
+    this.events.emit('profile-form:shown', { mode: 'entry', section });
+    return true;
+  }
+
+  _renderEntryForm(bubble, form) {
+    const row = bubble.closest('.ai-message-row');
+    const id = key => `ai-ef-${form.section}-${key}`;
+    let editingIndex = null;
+    const entries = Array.isArray(form.entries) ? form.entries : [];
+    const controlHtml = field => {
+      const common = `id="${id(field.key)}" name="${escapeHtml(field.key)}" class="ai-form-input"`;
+      const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : '';
+      const max = field.maxLength ? ` maxlength="${Number(field.maxLength)}"` : '';
+      if (field.type === 'textarea') return `<textarea ${common} rows="2"${placeholder}${max}></textarea>`;
+      if (field.type === 'checkbox') return `<input type="checkbox" id="${id(field.key)}" name="${escapeHtml(field.key)}">`;
+      if (field.type === 'month') return `<input type="month" ${common} min="1950-01" max="2100-12" placeholder="YYYY-MM">`;
+      return `<input type="text" ${common}${placeholder}${max}>`;
+    };
+    const fieldsHtml = form.fields.map(field => field.type === 'checkbox'
+      ? `<div class="ai-pf-field ai-ef-check" data-key="${escapeHtml(field.key)}">
+          <label class="ai-pf-chip ai-ef-check-label">${controlHtml(field)}<span>${escapeHtml(field.label)}</span></label>
+        </div>`
+      : `<div class="ai-pf-field${field.type === 'month' ? ' ai-ef-half' : ''}" data-key="${escapeHtml(field.key)}">
+          <label class="ai-pf-label" for="${id(field.key)}">${escapeHtml(field.label)}${field.required ? ' <span class="ai-ef-req" aria-hidden="true">*</span>' : ''}</label>
+          ${controlHtml(field)}
+          <div class="ai-pf-error" role="alert"></div>
+        </div>`).join('');
+
+    bubble.innerHTML = `
+      <form class="ai-profile-form ai-entry-form" novalidate>
+        <div class="ai-pf-head">
+          <div class="ai-pf-title">${escapeHtml(form.title)}</div>
+          <div class="ai-pf-subtitle">Fill in the details and press Save.${Number.isFinite(form.completion) ? ` <span class="ai-pf-progress">${form.completion}% complete</span>` : ''}</div>
+        </div>
+        ${entries.length ? `
+          <div class="ai-ef-saved">
+            <div class="ai-pf-hint">Already on your profile:</div>
+            ${entries.map(entry => `
+              <div class="ai-ef-saved-item">
+                <span class="ai-ef-saved-text">${escapeHtml(entry.summary)}</span>
+                <button type="button" class="ai-ef-edit" data-index="${Number(entry.index)}">Edit</button>
+              </div>`).join('')}
+          </div>` : ''}
+        <div class="ai-ef-grid">${fieldsHtml}</div>
+        <div class="ai-pf-form-error" role="alert"></div>
+        <div class="ai-pf-actions">
+          <button type="submit" class="ai-btn-action-confirm ai-pf-save">Save</button>
+          <button type="button" class="ai-btn-action-cancel ai-pf-cancel">Cancel</button>
+        </div>
+      </form>
+    `;
+    const formEl = bubble.querySelector('form');
+    const titleEl = bubble.querySelector('.ai-pf-title');
+    const saveBtn = bubble.querySelector('.ai-pf-save');
+    const formError = bubble.querySelector('.ai-pf-form-error');
+    const currentBox = formEl.querySelector(`#${CSS.escape(id('is_current'))}`);
+    const endWrap = formEl.querySelector('.ai-pf-field[data-key="end_date"]');
+
+    const syncCurrent = () => {
+      if (!currentBox || !endWrap) return;
+      endWrap.style.display = currentBox.checked ? 'none' : '';
+    };
+    const fill = values => {
+      for (const field of form.fields) {
+        const el = formEl.querySelector(`#${CSS.escape(id(field.key))}`);
+        if (!el) continue;
+        if (field.type === 'checkbox') el.checked = values?.[field.key] === true;
+        else el.value = typeof values?.[field.key] === 'string' ? values[field.key] : '';
+      }
+      syncCurrent();
+    };
+    const clearErrors = () => {
+      formError.textContent = '';
+      bubble.querySelectorAll('.ai-pf-field.has-error').forEach(el => {
+        el.classList.remove('has-error');
+        const err = el.querySelector('.ai-pf-error');
+        if (err) err.textContent = '';
+      });
+    };
+
+    fill(form.prefill || {});
+    currentBox?.addEventListener('change', syncCurrent);
+
+    bubble.querySelectorAll('.ai-ef-edit').forEach(button => {
+      button.addEventListener('click', () => {
+        const entry = entries.find(e => e.index === Number(button.dataset.index));
+        if (!entry) return;
+        editingIndex = entry.index;
+        fill(entry.values || {});
+        clearErrors();
+        titleEl.textContent = form.editTitle || form.title;
+        bubble.querySelectorAll('.ai-ef-saved-item').forEach(el => el.classList.remove('is-editing'));
+        button.closest('.ai-ef-saved-item')?.classList.add('is-editing');
+        formEl.querySelector('.ai-form-input')?.focus();
+      });
+    });
+    bubble.querySelector('.ai-pf-cancel').addEventListener('click', () => {
+      row?.remove();
+      this.events.emit('profile-form:cancelled');
+    });
+    formEl.addEventListener('input', event => {
+      const wrap = event.target.closest?.('.ai-pf-field');
+      if (wrap) {
+        wrap.classList.remove('has-error');
+        const err = wrap.querySelector('.ai-pf-error');
+        if (err) err.textContent = '';
+      }
+    });
+    formEl.addEventListener('submit', async event => {
+      event.preventDefault();
+      clearErrors();
+      const entry = {};
+      for (const field of form.fields) {
+        const el = formEl.querySelector(`#${CSS.escape(id(field.key))}`);
+        if (!el) continue;
+        entry[field.key] = field.type === 'checkbox' ? el.checked : el.value.trim();
+      }
+      // Required fields first, right here, so nothing is sent half-filled.
+      let firstMissing = null;
+      for (const field of form.fields.filter(f => f.required)) {
+        if (!entry[field.key]) {
+          const wrap = bubble.querySelector(`.ai-pf-field[data-key="${CSS.escape(field.key)}"]`);
+          wrap?.classList.add('has-error');
+          const err = wrap?.querySelector('.ai-pf-error');
+          if (err) err.textContent = `${field.label} is required.`;
+          firstMissing = firstMissing || wrap;
+        }
+      }
+      if (firstMissing) {
+        firstMissing.querySelector('input, textarea')?.focus();
+        return;
+      }
+      saveBtn.disabled = true;
+      saveBtn.textContent = 'Saving…';
+      try {
+        const result = await this._entryFormHandlers.save(form.section, entry, editingIndex);
+        row?.remove();
+        const what = form.section === 'education' ? 'Education' : 'Work experience';
+        const verb = result?.isNew === false ? 'updated' : 'added';
+        const progress = Number.isFinite(result?.completion) ? ` Your profile is now **${result.completion}% complete**.` : '';
+        let rest = '';
+        if (result?.missingCount === 0) {
+          rest = '\n\n🎉 Your profile is complete. Nice work!';
+        } else if (Array.isArray(result?.missing) && result.missing.length) {
+          rest = `\n\nStill missing: ${result.missing.join(', ')}. Say **complete my profile** to fill ${result.missing.length === 1 ? 'it' : 'them'} in.`;
+        }
+        this.postAssistantNote?.(`✅ ${what} ${verb}: ${result?.summary || ''}.${progress}${rest}`);
+        if (result?.missingCount === 0) this.updateProfileProgress(null);
+        this.events.emit('profile-form:saved', { changed: [form.section], missingCount: result?.missingCount ?? null });
+      } catch (error) {
+        const fields = error?.fields && typeof error.fields === 'object' ? error.fields : null;
+        let shownInline = false;
+        if (fields) {
+          for (const [key, message] of Object.entries(fields)) {
+            const wrap = bubble.querySelector(`.ai-pf-field[data-key="${CSS.escape(key)}"]`);
+            if (wrap) {
+              wrap.classList.add('has-error');
+              const err = wrap.querySelector('.ai-pf-error');
+              if (err) err.textContent = String(message);
+              shownInline = true;
+            }
+          }
+        }
+        formError.textContent = fields?.form
+          ? String(fields.form)
+          : (shownInline ? 'Please fix the highlighted fields.' : (error?.message || "I couldn't save this just now. Please try again."));
+        saveBtn.disabled = false;
+        saveBtn.textContent = 'Save';
+      }
+    });
+    this._scrollToBottom();
+    // Start where the user still has to type.
+    const firstEmpty = form.fields.find(field => field.required && !(form.prefill || {})[field.key]);
+    formEl.querySelector(`#${CSS.escape(id((firstEmpty || form.fields[0]).key))}`)?.focus({ preventScroll: true });
   }
 
   /**
@@ -1571,6 +1799,7 @@ export class AssistantWidgetUI {
       if (msg?.action && (msg.action === action || (action.id && msg.action.id === action.id))) {
         msg.action._status = action._status;
         msg.action._statusMessage = action._statusMessage;
+        if (action._dismissed) msg.action._dismissed = true;
       }
     }
     this._persistState();
@@ -1735,17 +1964,22 @@ export class AssistantWidgetUI {
         .replace(/\n{3,}/g, '\n\n')
         .trim();
     }
+    // The chat message right above usually says the same thing: don't repeat it in the card.
+    const plainText = value => String(value || '').replace(/[*_`#>]/g, '').replace(/\s+/g, ' ').trim().toLowerCase();
+    const explanationStart = plainText(explanationText.split(/\r?\n/).find(line => line.trim()) || '').slice(0, 60);
+    if (explanationStart && plainText(bubble.textContent).includes(explanationStart)) explanationText = '';
     const explanationHtml = explanationText ? parseMarkdown(explanationText) : '';
 
+    const isOwnProfileUpdate = /profile_update$/.test(String(action.formattedReview?.type || ''));
     const titleText = action.formattedReview?.title || action.title || 'Review Action';
     const confirmBtnLabel = action.formattedReview?.type === 'job_creation'
       ? 'Confirm &amp; Create'
-      : (isHirePoolAccountAction ? accountButtonLabel : 'Confirm &amp; Execute');
+      : (isHirePoolAccountAction ? accountButtonLabel : (isOwnProfileUpdate ? 'Save' : 'Confirm'));
 
     card.innerHTML = `
       <div class="ai-action-header">
         <span class="ai-action-badge">${badgeLabel}</span>
-        ${isHirePoolAccountAction ? '' : `<span class="ai-action-risk risk-${risk}">${risk === 'destructive' ? 'Destructive' : risk === 'read' ? 'Read' : 'Write'}</span>`}
+        ${risk === 'destructive' && !isHirePoolAccountAction ? '<span class="ai-action-risk risk-destructive">Can&#39;t be undone</span>' : ''}
         <span class="ai-action-title">${escapeHtml(titleText)}</span>
       </div>
       ${explanationHtml ? `<div class="ai-action-explanation">${explanationHtml}</div>` : ''}
@@ -1771,6 +2005,9 @@ export class AssistantWidgetUI {
     const controls = card.querySelector('.ai-action-controls');
     const acknowledgement = card.querySelector('.ai-action-acknowledge');
 
+    // Moved to the profile form: nothing left to show here.
+    if (action._dismissed) return;
+
     if (action._status && action._status !== 'pending') {
       if (controls) controls.style.display = 'none';
       if (acknowledgement) acknowledgement.disabled = true;
@@ -1795,11 +2032,18 @@ export class AssistantWidgetUI {
       btnEdit.addEventListener('click', () => {
         const body = action.parameters?.body || action.arguments?.body || null;
         // Own profile update: drop this review and edit everything in the form instead.
-        if (/profile_update$/.test(String(action.formattedReview?.type || '')) && this._profileFormHandlers) {
+        if (isOwnProfileUpdate && this._profileFormHandlers) {
           btnCancel.click();
-          statusMsg.textContent = 'Editing in the form below.';
-          action._statusMessage = 'Editing in the form below.';
-          void this.showProfileForm('all', { overrides: body && typeof body === 'object' ? body : null });
+          action._dismissed = true;
+          this._syncMessageActionState(action);
+          card.remove();
+          const section = Array.isArray(body?.education) ? 'education'
+            : (Array.isArray(body?.work_experience) ? 'work_experience' : null);
+          if (section && this._entryFormHandlers) {
+            void this.showEntryForm(section);
+          } else {
+            void this.showProfileForm('all', { overrides: body && typeof body === 'object' ? body : null });
+          }
           return;
         }
         // Candidate details: put the current values in the box so the user edits and sends them.
@@ -1846,7 +2090,7 @@ export class AssistantWidgetUI {
       statusMsg.className = 'ai-action-status-msg executing';
       statusMsg.textContent = isHirePoolAccountAction
         ? 'Opening HirePool login...'
-        : 'Executing action in the host application...';
+        : (isOwnProfileUpdate ? 'Saving…' : 'Working on it…');
 
       let handled = false;
 
@@ -3599,6 +3843,16 @@ export class AssistantWidgetUI {
       if (formMode) {
         await this.showProfileForm(formMode);
         return;
+      }
+    }
+
+    // Dashboard (candidates): education and work experience are added in a small form,
+    // pre-filled with anything already typed ("add education B.E at PES University 2022-2026").
+    if (this._entryFormHandlers && this.options?.surface === 'app') {
+      const entryMatch = trimmed.match(/^\s*(?:please\s+)?(?:i\s+(?:want|would\s+like|need)\s+to\s+)?(?:add|update|edit|change|enter|fill\s+in|complete)\s+(?:my\s+|an?\s+|the\s+|new\s+)?(education(?:al)?(?:\s+details)?|qualifications?|degree|work\s*experience|experience|employment(?:\s+history)?|job\s+history)\b(?!\s+(?:level|years?|for|of)\b)/i);
+      if (entryMatch) {
+        const section = /educat|qualif|degree/i.test(entryMatch[1]) ? 'education' : 'work_experience';
+        if (await this.showEntryForm(section, { text: trimmed })) return;
       }
     }
 

@@ -29,6 +29,8 @@ import {
   normKeyPart,
   compareYearMonth,
   parseHirePoolMonthDate,
+  formatDateSpan,
+  ENTRY_SEPARATOR,
   isSkillInstructionPhrase,
   cleanSkillToken,
   normalizeSkillsArray,
@@ -335,11 +337,23 @@ export function computeCandidateMissingFields(profile = {}) {
   };
 }
 
-function extractLabeledFields(text, labelAliases) {
+function extractLabeledFields(rawText, labelAliases) {
   const result = {};
   const escapedAliases = Object.keys(labelAliases)
     .sort((a, b) => b.length - a.length)
     .map(k => k.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'));
+  // "Degree: B.E Start date: 2022-12 Grade: 9" on one line: put each label on its own line.
+  // Matches never overlap, so "Job title:" stays whole instead of splitting at "title:".
+  const labelStart = new RegExp(`\\b(?:${escapedAliases.join('|')})\\s*[:=]`, 'gi');
+  let text = '';
+  let last = 0;
+  for (const found of String(rawText || '').matchAll(labelStart)) {
+    const before = rawText.slice(last, found.index);
+    text += before;
+    if (found.index > 0 && !/[\n;,]\s*$/.test(text)) text = `${text.replace(/\s+$/, '')}\n`;
+    last = found.index;
+  }
+  text += String(rawText || '').slice(last);
   const pattern = new RegExp(
     `(?:^|[\\n;,])\\s*(${escapedAliases.join('|')})(?:\\s*[:=]\\s*|\\s*[-–—]\\s+)([^\\n;]+?)(?=(?:[\\n;,]\\s*(?:${escapedAliases.join('|')})(?:\\s*[:=]|\\s*[-–—])|[\\n;]|$))`,
     'gi'
@@ -419,6 +433,19 @@ export function parseEducationFromMessage(message, existingDraft = {}, { expecti
   });
 
   if (labeled.institution) draft.institution = labeled.institution.replace(/[.,]+$/, '').trim();
+  // "PES Institute of Technology Degree: B.E ..." — unlabelled text before the first label is the college.
+  if (!labeled.institution && !draft.institution && Object.keys(labeled).length > 0) {
+    const firstLabel = raw.search(/\b(?:degree|field(?:\s+of\s+study)?|major|specialization|branch|stream|start(?:\s+date)?|end(?:\s+date)?|from|to|grade|cgpa|gpa|percentage|score)\s*[:=]/i);
+    const lead = firstLabel > 0
+      ? raw.slice(0, firstLabel)
+        .replace(/^(?:please\s+)?(?:add|edit|update|set|enter)?\s*(?:my\s+)?(?:education(?:al)?\s*(?:details|entry|info)?)?\s*[:,-]?\s*/i, '')
+        .replace(/[\s,;:-]+$/, '')
+        .trim()
+      : '';
+    if (lead.length >= 2 && lead.length <= 255 && !/\b(?:add|edit|update|cancel|skip)\b/i.test(lead)) {
+      draft.institution = lead;
+    }
+  }
   if (labeled.degree) draft.degree = labeled.degree.replace(/[.,]+$/, '').trim();
   if (labeled.field_of_study) draft.field_of_study = labeled.field_of_study.replace(/[.,]+$/, '').trim();
   if (labeled.grade) draft.grade = labeled.grade.replace(/[.,]+$/, '').trim();
@@ -473,6 +500,18 @@ export function parseEducationFromMessage(message, existingDraft = {}, { expecti
     }
     if (!draft.institution && freeMatch[3]) {
       draft.institution = freeMatch[3].replace(/[.,]+$/, '').trim();
+    }
+    // "PESITM B.E. Artificial Intelligence and Machine Learning": the college comes first
+    // and the field follows the degree without "in".
+    const before = remainder.slice(0, freeMatch.index).replace(/[\s,;:-]+$/, '').replace(/\s+(?:at|from)$/i, '').trim();
+    const after = remainder.slice(freeMatch.index + freeMatch[0].length).replace(/^[\s,;:.-]+/, '').replace(/[.,]+$/, '').trim();
+    if (!draft.institution && before.length >= 2 && !/^(?:i|my|the|a|an)$/i.test(before)) {
+      draft.institution = before;
+    }
+    if (!draft.field_of_study && after.length >= 2 && !/^(?:at|from)\b/i.test(after)) {
+      draft.field_of_study = after.replace(/^in\s+/i, '');
+    } else if (!draft.institution && /^(?:at|from)\s+/i.test(after)) {
+      draft.institution = after.replace(/^(?:at|from)\s+/i, '');
     }
   } else if (Object.keys(labeled).length === 0 && !dateRange.found) {
     // Check explicit "at/from <Institution>"
@@ -1577,7 +1616,7 @@ export function mergeCandidateProfileUpdate(currentProfile = {}, requestedBody =
  */
 export function formatCandidateProfileReview(body, currentProfile = {}, nextSectionLabel = null, { notes = [] } = {}) {
   const fields = [];
-  const lines = ['Review your proposed HirePool candidate profile update:'];
+  const lines = ['Here’s the update for your profile:'];
 
   if (typeof body.professional_summary === 'string') {
     const prev = currentProfile?.professional_summary ? `"${currentProfile.professional_summary}"` : '(none)';
@@ -1587,40 +1626,40 @@ export function formatCandidateProfileReview(body, currentProfile = {}, nextSect
   if (Array.isArray(body.education)) {
     const existingCount = Array.isArray(currentProfile?.education) ? currentProfile.education.length : 0;
     const summaryEntries = body.education.map((edu, idx) => {
-      const span = [edu.start_date, edu.end_date].filter(Boolean).join(' to ');
+      const span = formatDateSpan(edu.start_date, edu.end_date);
       const parts = [edu.degree, edu.field_of_study, edu.institution].filter(Boolean).join(' — ');
-      return `${idx + 1}. ${parts}${span ? ` (${span})` : ''}${edu.grade ? ` [${edu.grade}]` : ''}`;
+      return `${parts}${span ? ` (${span})` : ''}${edu.grade ? `, ${edu.grade}` : ''}`;
     });
     fields.push({
-      label: `Education (${body.education.length} total, ${existingCount} existing)`,
-      value: summaryEntries.length ? summaryEntries.join(' | ') : '(cleared)'
+      label: 'Education',
+      value: summaryEntries.length ? summaryEntries.join(ENTRY_SEPARATOR) : '(cleared)'
     });
-    lines.push(`- **Education (${body.education.length} total, ${existingCount} existing):**`, ...summaryEntries.map(s => `  - ${s}`));
+    lines.push(`- **Education:**`, ...summaryEntries.map(s => `  - ${s}`));
   }
   if (Array.isArray(body.work_experience)) {
     const existingCount = Array.isArray(currentProfile?.work_experience) ? currentProfile.work_experience.length : 0;
     const summaryEntries = body.work_experience.map((exp, idx) => {
-      const span = [exp.start_date, exp.is_current ? 'Present' : exp.end_date].filter(Boolean).join(' to ');
-      return `${idx + 1}. ${exp.title} at ${exp.company}${exp.location ? `, ${exp.location}` : ''}${span ? ` (${span})` : ''}`;
+      const span = formatDateSpan(exp.start_date, exp.end_date, { current: exp.is_current });
+      return `${exp.title} at ${exp.company}${exp.location ? `, ${exp.location}` : ''}${span ? ` (${span})` : ''}`;
     });
     fields.push({
-      label: `Work Experience (${body.work_experience.length} total, ${existingCount} existing)`,
-      value: summaryEntries.length ? summaryEntries.join(' | ') : '(cleared)'
+      label: 'Work experience',
+      value: summaryEntries.length ? summaryEntries.join(ENTRY_SEPARATOR) : '(cleared)'
     });
-    lines.push(`- **Work Experience (${body.work_experience.length} total, ${existingCount} existing):**`, ...summaryEntries.map(s => `  - ${s}`));
+    lines.push(`- **Work experience:**`, ...summaryEntries.map(s => `  - ${s}`));
   }
   if (Array.isArray(body.certifications)) {
     const existingCount = Array.isArray(currentProfile?.certifications) ? currentProfile.certifications.length : 0;
     const summaryEntries = body.certifications.map((cert, idx) => {
-      const span = [cert.issue_date, cert.expiry_date].filter(Boolean).join(' to ');
+      const span = formatDateSpan(cert.issue_date, cert.expiry_date);
       const parts = [cert.name, cert.issuing_organization].filter(Boolean).join(' — ');
-      return `${idx + 1}. ${parts}${span ? ` (${span})` : ''}${cert.credential_id ? ` [${cert.credential_id}]` : ''}`;
+      return `${parts}${span ? ` (${span})` : ''}${cert.credential_id ? ` [${cert.credential_id}]` : ''}`;
     });
     fields.push({
-      label: `Certifications (${body.certifications.length} total, ${existingCount} existing)`,
-      value: summaryEntries.length ? summaryEntries.join(' | ') : '(none)'
+      label: 'Certifications',
+      value: summaryEntries.length ? summaryEntries.join(ENTRY_SEPARATOR) : '(none)'
     });
-    lines.push(`- **Certifications (${body.certifications.length} total):**`, ...summaryEntries.map(s => `  - ${s}`));
+    lines.push(`- **Certifications:**`, ...summaryEntries.map(s => `  - ${s}`));
   }
   if (Array.isArray(body.skills)) {
     const existingSkills = Array.isArray(currentProfile?.skills) ? currentProfile.skills : [];
@@ -1684,13 +1723,14 @@ export function formatCandidateProfileReview(body, currentProfile = {}, nextSect
   if (nextSectionLabel) {
     lines.push('', `After confirming this update, I will help you complete **${nextSectionLabel}** next.`);
   }
-  lines.push('', 'Choose **“Confirm & Execute”** below to save these changes to HirePool, or tell me what to adjust first (or say **Cancel** to discard).');
+  lines.push('', 'Press **Save** below to update your profile, or **Edit details** to change something (say **Cancel** to discard).');
 
   return {
-    reviewMessage: lines.join('\n'),
+    // The details are in the review card's table; the message only introduces it.
+    reviewMessage: lines.filter(line => !/^\s*-\s+\*\*|^\s{2,}-\s/.test(line)).join('\n').replace(/\n{3,}/g, '\n\n'),
     formattedReview: {
       type: 'candidate_profile_update',
-      title: 'Review Profile Update',
+      title: 'Review your update',
       fields
     }
   };
@@ -2297,7 +2337,7 @@ export async function handleCandidateProfileEditTurn({
     if (/^\s*(?:confirm|yes|save(?:\s+it|\s+changes)?|looks\s+good)\s*[.!?]*$/i.test(text)) {
       return {
         handled: true,
-        text: 'Your update is staged and ready. Click **"Confirm & Execute"** below to apply it to HirePool, or tell me what you would like to adjust first (or say **Cancel** to discard).'
+        text: 'Your update is staged and ready. Press **Save** below to update your profile, or tell me what you would like to adjust first (or say **Cancel** to discard).'
       };
     }
 

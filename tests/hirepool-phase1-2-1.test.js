@@ -759,7 +759,7 @@ test('Phase 1.2.1 A: matching response formatters omit Application status & Scre
   assert.match(formatted, /DeepCore AI/);
   assert.match(formatted, /Location:\*\* Bengaluru/);
   assert.match(formatted, /Work type:\*\* hybrid|Work type:\*\* Hybrid/i);
-  assert.match(formatted, /Job type:\*\* full_time|Job type:\*\* Full Time/i);
+  assert.match(formatted, /Job type:\*\* Full-time/);
   assert.match(formatted, /HirePool match:\*\* 91%/);
   assert.match(formatted, /Required skills:\*\* Python, PyTorch/);
   assert.doesNotMatch(formatted, /Application status|Screening:|No existing application|Requires checking/i);

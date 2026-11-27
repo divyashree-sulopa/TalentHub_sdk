@@ -368,6 +368,12 @@ class AssistantSDK {
         load: (mode) => this._profileFormRequest("GET", mode),
         save: (values) => this._profileFormRequest("POST", null, values),
       });
+      // Candidates: one education / work-experience entry at a time, in a small form.
+      this.widgetUI.setEntryFormHandlers?.({
+        prepare: (section, text) => this._assistantRequest("POST", "profile-entry/prepare", { section, text: text || "" }),
+        save: (section, entry, index) =>
+          this._assistantRequest("POST", "profile-entry", { section, entry, index: Number.isInteger(index) ? index : null }),
+      });
       // Agency dashboard: resumes -> bench, bench -> a job.
       this.widgetUI.setAssistantHandlers?.({
         addCandidate: (candidate) =>
