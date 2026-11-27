@@ -119,3 +119,11 @@ test('signup calls the configured API and accepts a configured website origin', 
     if (saved.site === undefined) delete process.env.HIREPOOL_WEBSITE_ORIGINS; else process.env.HIREPOOL_WEBSITE_ORIGINS = saved.site;
   }
 });
+
+test('signup User Agreement link uses the configured app address (localhost only as fallback)', async () => {
+  const { getAgreementPageUrl } = await import('../widget/src/hirepool-signup.js');
+  assert.equal(getAgreementPageUrl('candidate', 'https://app.hirepool.ai'), 'https://app.hirepool.ai/agreements?role=candidate');
+  assert.equal(getAgreementPageUrl('client', 'https://app.hirepool.ai/login'), 'https://app.hirepool.ai/agreements?role=client');
+  assert.equal(getAgreementPageUrl('consultancy'), 'http://localhost:5173/agreements?role=consultancy');
+  assert.equal(getAgreementPageUrl('candidate', 'javascript:alert(1)'), 'http://localhost:5173/agreements?role=candidate');
+});

@@ -2222,7 +2222,16 @@ var AssistantSDKBundle = (() => {
     });
     return card;
   }
-  function renderSignupFormCard({ role, agreement, onSubmit, onCancel }) {
+  function getAgreementPageUrl(role, appOrigin = null) {
+    let base = "http://localhost:5173";
+    try {
+      const url = new URL(appOrigin);
+      if (url.protocol === "https:" || url.protocol === "http:") base = url.origin;
+    } catch {
+    }
+    return `${base}/agreements?role=${encodeURIComponent(role || "")}`;
+  }
+  function renderSignupFormCard({ role, agreement, onSubmit, onCancel, appOrigin = null }) {
     const card = document.createElement("div");
     card.className = "ai-action-card ai-signup-card";
     const roleMeta = ROLE_DEFINITIONS[role] || { label: role, badge: "HirePool Account" };
@@ -2253,7 +2262,7 @@ var AssistantSDKBundle = (() => {
       <div class="ai-form-group ai-agreement-group">
         <label class="ai-action-acknowledgement" style="font-size: 13px;">
           <input type="checkbox" name="acceptAgreement" required>
-          I agree to the <a href="http://localhost:5173/agreements?role=${encodeURIComponent(role)}" target="_blank" rel="noopener noreferrer" style="color: #16a34a; text-decoration: underline;">HirePool User Agreement (v${escapeHtml2(agreement?.version || "1.0")})</a>.
+          I agree to the <a href="${escapeHtml2(getAgreementPageUrl(role, appOrigin))}" target="_blank" rel="noopener noreferrer" style="color: #16a34a; text-decoration: underline;">HirePool User Agreement (v${escapeHtml2(agreement?.version || "1.0")})</a>.
         </label>
       </div>
 
@@ -2881,6 +2890,7 @@ var AssistantSDKBundle = (() => {
       document.body.appendChild(this.hostElement);
       if (this.options?.surface === "website" || this.options?.surface === "app") {
         this.container.classList.add("ai-theme-hirepool");
+        this.container.setAttribute("data-theme", "light");
         if (this.textarea) this.textarea.placeholder = "Type your question\u2026";
       }
       if (this.options?.surface === "website") {
@@ -4030,6 +4040,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
       }
     }
     setTheme(theme) {
+      if (this.container?.classList.contains("ai-theme-hirepool")) return;
       if (["light", "dark", "auto"].includes(theme)) {
         this.container.setAttribute("data-theme", theme);
         this.options.theme = theme;
@@ -4311,7 +4322,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
       card.innerHTML = `
       <div class="ai-action-header">
         <span class="ai-action-badge">${badgeLabel}</span>
-        <span class="ai-action-risk risk-${risk}">${risk === "destructive" ? "Destructive" : risk === "read" ? "Read" : "Write"}</span>
+        ${isHirePoolAccountAction ? "" : `<span class="ai-action-risk risk-${risk}">${risk === "destructive" ? "Destructive" : risk === "read" ? "Read" : "Write"}</span>`}
         <span class="ai-action-title">${escapeHtml(titleText)}</span>
       </div>
       ${explanationHtml ? `<div class="ai-action-explanation">${explanationHtml}</div>` : ""}
@@ -4715,6 +4726,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
         card = renderSignupFormCard({
           role: data.role || this.hirePoolSignup.selectedRole,
           agreement: data.agreement || this.hirePoolSignup.agreement,
+          appOrigin: this._getApprovedAppOrigins()[0] || null,
           onSubmit: (formData) => this.hirePoolSignup.submitSignup(formData),
           onCancel: () => void this.hirePoolSignup.cancel()
         });
@@ -9544,6 +9556,26 @@ ${tag}` : tag;
 .ai-bench-review { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .ai-bench-review .ai-profile-form { width: 100%; }
+
+/* Action / signup cards: badges on one line, the title on its own full line */
+.ai-action-header {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.ai-action-header .ai-action-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.ai-theme-hirepool .ai-action-badge,
+.ai-theme-hirepool .ai-action-risk.risk-write {
+  background: rgba(163, 230, 53, 0.22);
+  color: #3f6212;
+}
 `;
 
   // widget/src/hirepool-app-session.js

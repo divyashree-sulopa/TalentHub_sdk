@@ -2325,3 +2325,23 @@
 .ai-bench-review { display: flex; flex-wrap: wrap; gap: 6px; }
 
 .ai-bench-review .ai-profile-form { width: 100%; }
+
+/* Action / signup cards: badges on one line, the title on its own full line */
+.ai-action-header {
+  flex-wrap: wrap;
+  row-gap: 6px;
+}
+
+.ai-action-header .ai-action-title {
+  flex: 1 1 100%;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  font-size: 14px;
+  line-height: 1.35;
+}
+
+.ai-theme-hirepool .ai-action-badge,
+.ai-theme-hirepool .ai-action-risk.risk-write {
+  background: rgba(163, 230, 53, 0.22);
+  color: #3f6212;
+}

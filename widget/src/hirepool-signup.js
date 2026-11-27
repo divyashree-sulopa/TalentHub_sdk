@@ -607,7 +607,17 @@ export function renderRoleSelectionCard({ onSelect, onCancel }) {
   return card;
 }
 
-export function renderSignupFormCard({ role, agreement, onSubmit, onCancel }) {
+/** The HirePool app's User Agreement page (configured app address; local app by default). */
+export function getAgreementPageUrl(role, appOrigin = null) {
+  let base = 'http://localhost:5173';
+  try {
+    const url = new URL(appOrigin);
+    if (url.protocol === 'https:' || url.protocol === 'http:') base = url.origin;
+  } catch {}
+  return `${base}/agreements?role=${encodeURIComponent(role || '')}`;
+}
+
+export function renderSignupFormCard({ role, agreement, onSubmit, onCancel, appOrigin = null }) {
   const card = document.createElement('div');
   card.className = 'ai-action-card ai-signup-card';
   const roleMeta = ROLE_DEFINITIONS[role] || { label: role, badge: 'HirePool Account' };
@@ -639,7 +649,7 @@ export function renderSignupFormCard({ role, agreement, onSubmit, onCancel }) {
       <div class="ai-form-group ai-agreement-group">
         <label class="ai-action-acknowledgement" style="font-size: 13px;">
           <input type="checkbox" name="acceptAgreement" required>
-          I agree to the <a href="http://localhost:5173/agreements?role=${encodeURIComponent(role)}" target="_blank" rel="noopener noreferrer" style="color: #16a34a; text-decoration: underline;">HirePool User Agreement (v${escapeHtml(agreement?.version || '1.0')})</a>.
+          I agree to the <a href="${escapeHtml(getAgreementPageUrl(role, appOrigin))}" target="_blank" rel="noopener noreferrer" style="color: #16a34a; text-decoration: underline;">HirePool User Agreement (v${escapeHtml(agreement?.version || '1.0')})</a>.
         </label>
       </div>
 

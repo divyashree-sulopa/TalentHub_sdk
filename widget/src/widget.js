@@ -128,6 +128,9 @@ export class AssistantWidgetUI {
     if (this.options?.surface === 'website' || this.options?.surface === 'app') {
       // HirePool look on the website and in the dashboards: dark header, pill input, roomy bubbles.
       this.container.classList.add('ai-theme-hirepool');
+      // The HirePool design has its own fixed colours (dark header, light chat area), so it
+      // does not follow the visitor's dark mode (that made text white on white cards).
+      this.container.setAttribute('data-theme', 'light');
       if (this.textarea) this.textarea.placeholder = 'Type your question…';
     }
     if (this.options?.surface === 'website') {
@@ -1409,6 +1412,8 @@ export class AssistantWidgetUI {
   }
 
   setTheme(theme) {
+    // The HirePool theme keeps its own fixed colours.
+    if (this.container?.classList.contains('ai-theme-hirepool')) return;
     if (['light', 'dark', 'auto'].includes(theme)) {
       this.container.setAttribute('data-theme', theme);
       this.options.theme = theme;
@@ -1740,7 +1745,7 @@ export class AssistantWidgetUI {
     card.innerHTML = `
       <div class="ai-action-header">
         <span class="ai-action-badge">${badgeLabel}</span>
-        <span class="ai-action-risk risk-${risk}">${risk === 'destructive' ? 'Destructive' : risk === 'read' ? 'Read' : 'Write'}</span>
+        ${isHirePoolAccountAction ? '' : `<span class="ai-action-risk risk-${risk}">${risk === 'destructive' ? 'Destructive' : risk === 'read' ? 'Read' : 'Write'}</span>`}
         <span class="ai-action-title">${escapeHtml(titleText)}</span>
       </div>
       ${explanationHtml ? `<div class="ai-action-explanation">${explanationHtml}</div>` : ''}
@@ -2213,6 +2218,7 @@ export class AssistantWidgetUI {
       card = renderSignupFormCard({
         role: data.role || this.hirePoolSignup.selectedRole,
         agreement: data.agreement || this.hirePoolSignup.agreement,
+        appOrigin: this._getApprovedAppOrigins()[0] || null,
         onSubmit: (formData) => this.hirePoolSignup.submitSignup(formData),
         onCancel: () => void this.hirePoolSignup.cancel()
       });
