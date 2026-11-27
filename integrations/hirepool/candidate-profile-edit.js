@@ -30,6 +30,7 @@ import {
   compareYearMonth,
   parseHirePoolMonthDate,
   formatDateSpan,
+  formatMonthYear,
   ENTRY_SEPARATOR,
   isSkillInstructionPhrase,
   cleanSkillToken,
@@ -536,6 +537,49 @@ export function parseEducationFromMessage(message, existingDraft = {}, { expecti
 /**
  * Extract structured Work Experience fields from freeform or labeled chat text.
  */
+const COMPANY_LABEL = '(?:company(?:\\s+name)?|employer|organi[sz]ation|firm)';
+const ROLE_LABEL = '(?:job\\s+title|title|role|position|designation)';
+const ROLE_WORDS = /\b(?:intern(?:ship)?|engineer|developer|manager|analyst|designer|lead|executive|consultant|associate|specialist|architect|scientist|officer|head|director|trainee|administrator|tester|programmer|accountant|recruiter|coordinator|representative|assistant|technician|sde|qa)\b/i;
+
+/** Company and job title from looser writing; returns only what is clear. */
+function readLooseCompanyAndRole(rawText) {
+  const text = String(rawText || '').trim().replace(/[.]+$/, '');
+  if (!text) return {};
+  const clean = value => String(value || '').replace(/^[\s,;:-]+|[\s,;:.-]+$/g, '').trim();
+  const ok = value => value.length >= 2 && value.length <= 150;
+  const found = {};
+
+  // "<value> - company" / "<value> - role" (value first, label after a dash)
+  const valueThenLabel = new RegExp(`([^,;\\n]+?)\\s*[-–—]\\s*(${COMPANY_LABEL}|${ROLE_LABEL})\\b`, 'gi');
+  for (const match of text.matchAll(valueThenLabel)) {
+    const value = clean(match[1]);
+    if (!ok(value)) continue;
+    if (new RegExp(`^${COMPANY_LABEL}$`, 'i').test(match[2])) found.company = found.company || value;
+    else found.title = found.title || value;
+  }
+  if (found.company && found.title) return found;
+
+  // "company <value> role <value>" or "role <value> company <value>" (labels without colons)
+  const companyFirst = text.match(new RegExp(`^${COMPANY_LABEL}\\s+(?:is\\s+)?(.+?)[,;]?\\s+${ROLE_LABEL}\\s+(?:is\\s+)?(.+)$`, 'i'));
+  if (companyFirst && ok(clean(companyFirst[1])) && ok(clean(companyFirst[2]))) {
+    return { company: clean(companyFirst[1]), title: clean(companyFirst[2]) };
+  }
+  const roleFirst = text.match(new RegExp(`^${ROLE_LABEL}\\s+(?:is\\s+)?(.+?)[,;]?\\s+${COMPANY_LABEL}\\s+(?:is\\s+)?(.+)$`, 'i'));
+  if (roleFirst && ok(clean(roleFirst[1])) && ok(clean(roleFirst[2]))) {
+    return { title: clean(roleFirst[1]), company: clean(roleFirst[2]) };
+  }
+
+  // "AI Engineer Intern, resoluteai": two parts, and only one of them sounds like a job title.
+  const parts = text.split(/\s*[,;|]\s*|\s+[-–—]\s+/).map(clean).filter(Boolean);
+  if (!found.company && !found.title && parts.length === 2 && parts.every(ok)) {
+    const roleLike = parts.map(part => ROLE_WORDS.test(part));
+    if (roleLike[0] !== roleLike[1]) {
+      return roleLike[0] ? { title: parts[0], company: parts[1] } : { company: parts[0], title: parts[1] };
+    }
+  }
+  return found;
+}
+
 export function parseWorkExperienceFromMessage(message, existingDraft = {}, { expectingField = null } = {}) {
   const raw = String(message || '').trim();
   const normalized = normalizeText(raw);
@@ -619,7 +663,15 @@ export function parseWorkExperienceFromMessage(message, existingDraft = {}, { ex
     remainder = remainder.replace(dateRange.matchedText, ' ').replace(/,\s*$/, '').trim();
   }
 
-  if (Object.keys(labeled).length === 0) {
+  // Other ways people write it: "resoluteai - company, AI Engineer Intern - role",
+  // "company resoluteai role AI Engineer Intern", "AI Engineer Intern, resoluteai".
+  if (Object.keys(labeled).length === 0 && (!draft.company || !draft.title)) {
+    const loose = readLooseCompanyAndRole(remainder);
+    if (loose.company && !draft.company) draft.company = loose.company;
+    if (loose.title && !draft.title) draft.title = loose.title;
+  }
+
+  if (Object.keys(labeled).length === 0 && !(draft.company && draft.title)) {
     // Pattern: "<Title> at <Company> [in <Location>]"
     const roleAtMatch = remainder.match(/^(?:worked\s+as\s+(?:a\s+|an\s+)?)?(.+?)\s+at\s+([^,;]+?)(?:\s+in\s+([^,;]+?))?(?:[,;]\s*(.+))?$/i);
     if (roleAtMatch && roleAtMatch[1].length >= 2 && roleAtMatch[2].length >= 2) {
@@ -2859,18 +2911,25 @@ export async function handleCandidateProfileEditTurn({
         parsedDraft.degree ? `- **Degree:** ${parsedDraft.degree}` : null,
         parsedDraft.field_of_study ? `- **Field of study:** ${parsedDraft.field_of_study}` : null,
         parsedDraft.institution ? `- **Institution:** ${parsedDraft.institution}` : null,
-        parsedDraft.start_date ? `- **Start date:** ${parsedDraft.start_date}` : null,
-        parsedDraft.end_date ? `- **End date:** ${parsedDraft.end_date}` : null,
+        parsedDraft.start_date ? `- **Start date:** ${formatMonthYear(parsedDraft.start_date)}` : null,
+        parsedDraft.end_date ? `- **End date:** ${formatMonthYear(parsedDraft.end_date)}` : null,
         parsedDraft.grade ? `- **Grade:** ${parsedDraft.grade}` : null
       ].filter(Boolean);
 
+      // Ask only for what is missing, with an example of a reply that works.
+      let ask;
+      if (!effectiveEntry.degree?.trim() && !effectiveEntry.institution?.trim()) {
+        ask = "I couldn't tell your degree and college apart. Please reply like this: **B.E. in Computer Science at PES University**.";
+      } else if (!effectiveEntry.institution?.trim()) {
+        ask = `Got it. Which college or university was your **${effectiveEntry.degree.trim()}** from? (for example *PES University*)`;
+      } else {
+        ask = `Got it. Which degree did you study at **${effectiveEntry.institution.trim()}**? (for example *B.E.* or *B.Tech*)`;
+      }
       return {
         handled: true,
-        text: [
-          capturedParts.length ? 'I captured these education details so far:\n' + capturedParts.join('\n') : 'To add your education entry, I need both your degree and institution.',
-          '',
-          `Please provide the missing required detail${missingRequired.length > 1 ? 's' : ''}: ${missingRequired.join(' and ')}.`
-        ].join('\n')
+        text: capturedParts.length > 1
+          ? ['So far I have:', ...capturedParts, '', ask].join('\n')
+          : ask
       };
     }
 
@@ -2998,17 +3057,24 @@ export async function handleCandidateProfileEditTurn({
         parsedDraft.title ? `- **Job title:** ${parsedDraft.title}` : null,
         parsedDraft.company ? `- **Company:** ${parsedDraft.company}` : null,
         parsedDraft.location ? `- **Location:** ${parsedDraft.location}` : null,
-        parsedDraft.start_date ? `- **Start date:** ${parsedDraft.start_date}` : null,
-        parsedDraft.is_current ? `- **End date:** Present (currently working)` : (parsedDraft.end_date ? `- **End date:** ${parsedDraft.end_date}` : null)
+        parsedDraft.start_date ? `- **Start date:** ${formatMonthYear(parsedDraft.start_date)}` : null,
+        parsedDraft.is_current ? `- **End date:** Present (currently working)` : (parsedDraft.end_date ? `- **End date:** ${formatMonthYear(parsedDraft.end_date)}` : null)
       ].filter(Boolean);
 
+      // Ask only for what is missing, with an example of a reply that works.
+      let ask;
+      if (!effectiveEntry.company?.trim() && !effectiveEntry.title?.trim()) {
+        ask = "I couldn't tell which part is the company and which is your job title. Please reply like this: **AI Engineer Intern at ResoluteAI** (job title, then *at*, then the company).";
+      } else if (!effectiveEntry.title?.trim()) {
+        ask = `Got it. What was your job title at **${effectiveEntry.company.trim()}**? (for example *Software Engineer*)`;
+      } else {
+        ask = `Got it. Which company were you a **${effectiveEntry.title.trim()}** at? (for example *Infosys*)`;
+      }
       return {
         handled: true,
-        text: [
-          capturedParts.length ? 'I captured these work experience details so far:\n' + capturedParts.join('\n') : 'To add work experience, I need both your company and job title.',
-          '',
-          `Please provide the missing required detail${missingRequired.length > 1 ? 's' : ''}: ${missingRequired.join(' and ')}.`
-        ].join('\n')
+        text: capturedParts.length > 1 || (capturedParts.length === 1 && !/Job title|Company/.test(capturedParts[0]))
+          ? ['So far I have:', ...capturedParts, '', ask].join('\n')
+          : ask
       };
     }
 
@@ -3359,7 +3425,8 @@ export async function handleHirePoolProfileEditTurn({
   readProfile,
   readCurrentProfile,
   stageProfileUpdate,
-  cancelConfirmation
+  cancelConfirmation,
+  canOpenEntryForm = false
 }) {
   const text = normalizeText(message);
   if (!text) return { handled: false };
@@ -3378,7 +3445,7 @@ export async function handleHirePoolProfileEditTurn({
     });
   }
 
-  return await handleCandidateProfileEditTurn({
+  const result = await handleCandidateProfileEditTurn({
     message,
     session,
     authUser,
@@ -3386,4 +3453,65 @@ export async function handleHirePoolProfileEditTurn({
     stageProfileUpdate,
     cancelConfirmation
   });
+  return canOpenEntryForm ? handOffToEntryForm(result, session, authUser) : result;
+}
+
+const ENTRY_FORM_SECTIONS = new Set([HIREPOOL_PROFILE_SECTIONS.EDUCATION, HIREPOOL_PROFILE_SECTIONS.WORK_EXPERIENCE]);
+
+/** The draft gathered in chat, as the form's pre-filled values (only what was actually understood). */
+function draftToEntryPrefill(section, draft = {}) {
+  const keys = section === HIREPOOL_PROFILE_SECTIONS.EDUCATION
+    ? ['institution', 'degree', 'field_of_study', 'start_date', 'end_date', 'grade']
+    : ['company', 'title', 'location', 'start_date', 'end_date', 'description'];
+  const prefill = {};
+  for (const key of keys) {
+    const value = draft?.[key];
+    if (typeof value !== 'string' || !value.trim()) continue;
+    if ((key === 'start_date' || key === 'end_date') && !/^\d{4}-\d{2}$/.test(value.trim())) continue;
+    prefill[key] = value.trim().slice(0, 2000);
+  }
+  if (section === HIREPOOL_PROFILE_SECTIONS.WORK_EXPERIENCE && draft?.is_current === true) {
+    prefill.is_current = true;
+    delete prefill.end_date;
+  }
+  return prefill;
+}
+
+/**
+ * Dashboard widgets that can show the education / work-experience form: instead of asking
+ * for details in a set format (and asking again when it can't read them), hand over to the
+ * form with whatever was understood. The chat workflow ends; the form saves on its own.
+ */
+function handOffToEntryForm(result, session, authUser) {
+  if (!result?.handled || result.hostAction) return result;
+  const state = session?.hirePoolProfileEdit;
+  const section = state?.selectedSection;
+  if (!state?.active || !ENTRY_FORM_SECTIONS.has(section) || state.stage !== 'collecting' || state.operation === 'remove') {
+    return result;
+  }
+  const prefill = draftToEntryPrefill(section, state.draftData?.[section] || {});
+  session.hirePoolProfileEdit = {
+    ...state,
+    userId: authUser?.id || state.userId || null,
+    active: false,
+    suspended: false,
+    stage: 'completed',
+    selectedSection: null,
+    pendingSections: [],
+    operation: 'add',
+    targetIndex: null,
+    draftData: {},
+    pendingConfirmation: false,
+    confirmationToken: null,
+    confirmationPayload: null,
+    updatedAt: new Date().toISOString()
+  };
+  const noun = section === HIREPOOL_PROFILE_SECTIONS.EDUCATION ? 'education' : 'work experience';
+  return {
+    handled: true,
+    text: Object.keys(prefill).length
+      ? `Let's finish your ${noun} in the short form below. I've filled in what I understood; check it and press **Save**.`
+      : `Let's add your ${noun} in the short form below. Fill it in and press **Save**.`,
+    ui: { openEntryForm: { section, prefill } }
+  };
 }

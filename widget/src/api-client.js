@@ -253,7 +253,8 @@ export class AssistantApiClient {
     onChunk,
     onDone,
     onAction,
-    onError
+    onError,
+    clientFeatures = []
   }) {
     const endpoint = stream ? '/api/chat/stream' : '/api/chat';
     const url = `${this.baseUrl}${endpoint}`;
@@ -271,6 +272,9 @@ export class AssistantApiClient {
     }
     if (typeof context === 'string' && context.trim().length > 0) {
       payload.context = context.trim();
+    }
+    if (Array.isArray(clientFeatures) && clientFeatures.length > 0) {
+      payload.clientFeatures = clientFeatures.filter(item => typeof item === 'string').slice(0, 10);
     }
 
     try {
@@ -346,7 +350,8 @@ export class AssistantApiClient {
             conversationId: event.logout?.loggedOut ? null : (event.conversationId || activeConversationId),
             model: event.model,
             logout: event.logout || null,
-            connectorResult: event.connectorResult || null
+            connectorResult: event.connectorResult || null,
+            ui: event.ui || null
           };
           if (onDone) onDone(result);
         } else if (event.type === 'error') {

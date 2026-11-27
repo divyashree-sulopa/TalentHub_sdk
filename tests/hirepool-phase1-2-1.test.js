@@ -1360,9 +1360,9 @@ test('Phase 1.2.1 C: multi-section flow "Add Education and Professional Summary"
     assert.equal(s3.body.action, undefined);
     assert.match(s3.body.text, /B\.E\./);
     assert.match(s3.body.text, /Artificial Intelligence and Machine Learning/);
-    assert.match(s3.body.text, /2022-12/);
-    assert.match(s3.body.text, /2026-06/);
-    assert.match(s3.body.text, /institution/i);
+    assert.match(s3.body.text, /Dec 2022/);
+    assert.match(s3.body.text, /Jun 2026/);
+    assert.match(s3.body.text, /college or university/i);
     assert.doesNotMatch(s3.body.text, /Not Provided/i);
 
     // 4. Supply missing institution "PES University" -> stages MERGED confirmation card preserving existing IIIT Bangalore degree!

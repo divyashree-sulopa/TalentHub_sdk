@@ -1339,7 +1339,7 @@ export class AssistantWidgetUI {
    * whatever the user already typed. Returns false (and shows nothing) when the account
    * cannot use it, so the message goes to the chat as usual.
    */
-  async showEntryForm(section, { text = '' } = {}) {
+  async showEntryForm(section, { text = '', prefill = null } = {}) {
     if (!this._entryFormHandlers || !this.messagesList) return false;
     if (!['education', 'work_experience'].includes(section)) return false;
     if (!this.isOpen) this.open({ focus: false });
@@ -1369,6 +1369,13 @@ export class AssistantWidgetUI {
     if (!form || !Array.isArray(form.fields)) {
       row.remove();
       return false;
+    }
+    // What the chat already understood is added to the form's own pre-fill.
+    if (prefill && typeof prefill === 'object') {
+      const known = new Set(form.fields.map(field => field.key));
+      const extra = Object.fromEntries(Object.entries(prefill).filter(([key, value]) =>
+        known.has(key) && (typeof value === 'string' ? value.trim() : value === true)));
+      form = { ...form, prefill: { ...(form.prefill || {}), ...extra } };
     }
     this._renderEntryForm(bubble, form);
     this.events.emit('profile-form:shown', { mode: 'entry', section });
@@ -3941,6 +3948,8 @@ export class AssistantWidgetUI {
           assistantId: this.options.assistantId || 'default',
           message: trimmed,
           context: contextPayload,
+          // Dashboard: the server may hand education / work experience over to the form.
+          clientFeatures: this._entryFormHandlers && this.options?.surface === 'app' ? ['entry-form'] : [],
           conversationId: (typeof this.activeConversationId === 'string' && this.activeConversationId.trim().length > 0) ? this.activeConversationId.trim() : undefined,
           history: (displayUserMessage ? this.messages.slice(0, -1) : this.messages).filter(m => !m.local).slice(-25),
           stream,
@@ -4004,6 +4013,10 @@ export class AssistantWidgetUI {
             this.messages.push({ role: 'assistant', content: finalText, action: detectedAction || undefined });
             this._persistState();
             this.events.emit('message:received', { role: 'assistant', content: finalText, action: detectedAction || undefined });
+            const entryForm = result?.ui?.openEntryForm;
+            if (entryForm && this._entryFormHandlers) {
+              void this.showEntryForm(entryForm.section, { prefill: entryForm.prefill || null });
+            }
           },
           onError: async (err) => {
             await handleError(err);

@@ -4134,7 +4134,7 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
      * whatever the user already typed. Returns false (and shows nothing) when the account
      * cannot use it, so the message goes to the chat as usual.
      */
-    async showEntryForm(section, { text = "" } = {}) {
+    async showEntryForm(section, { text = "", prefill = null } = {}) {
       if (!this._entryFormHandlers || !this.messagesList) return false;
       if (!["education", "work_experience"].includes(section)) return false;
       if (!this.isOpen) this.open({ focus: false });
@@ -4162,6 +4162,11 @@ ${result.missingCount} detail${result.missingCount === 1 ? "" : "s"} still missi
       if (!form || !Array.isArray(form.fields)) {
         row.remove();
         return false;
+      }
+      if (prefill && typeof prefill === "object") {
+        const known = new Set(form.fields.map((field) => field.key));
+        const extra = Object.fromEntries(Object.entries(prefill).filter(([key, value]) => known.has(key) && (typeof value === "string" ? value.trim() : value === true)));
+        form = { ...form, prefill: { ...form.prefill || {}, ...extra } };
       }
       this._renderEntryForm(bubble, form);
       this.events.emit("profile-form:shown", { mode: "entry", section });
@@ -6439,6 +6444,8 @@ ${tag}` : tag;
             assistantId: this.options.assistantId || "default",
             message: trimmed,
             context: contextPayload,
+            // Dashboard: the server may hand education / work experience over to the form.
+            clientFeatures: this._entryFormHandlers && this.options?.surface === "app" ? ["entry-form"] : [],
             conversationId: typeof this.activeConversationId === "string" && this.activeConversationId.trim().length > 0 ? this.activeConversationId.trim() : void 0,
             history: (displayUserMessage ? this.messages.slice(0, -1) : this.messages).filter((m) => !m.local).slice(-25),
             stream,
@@ -6496,6 +6503,10 @@ ${tag}` : tag;
               this.messages.push({ role: "assistant", content: finalText, action: detectedAction || void 0 });
               this._persistState();
               this.events.emit("message:received", { role: "assistant", content: finalText, action: detectedAction || void 0 });
+              const entryForm = result?.ui?.openEntryForm;
+              if (entryForm && this._entryFormHandlers) {
+                void this.showEntryForm(entryForm.section, { prefill: entryForm.prefill || null });
+              }
             },
             onError: async (err) => {
               await handleError(err);
@@ -6793,7 +6804,8 @@ ${tag}` : tag;
       onChunk,
       onDone,
       onAction,
-      onError
+      onError,
+      clientFeatures = []
     }) {
       const endpoint = stream ? "/api/chat/stream" : "/api/chat";
       const url = `${this.baseUrl}${endpoint}`;
@@ -6810,6 +6822,9 @@ ${tag}` : tag;
       }
       if (typeof context === "string" && context.trim().length > 0) {
         payload.context = context.trim();
+      }
+      if (Array.isArray(clientFeatures) && clientFeatures.length > 0) {
+        payload.clientFeatures = clientFeatures.filter((item) => typeof item === "string").slice(0, 10);
       }
       try {
         const send = async () => {
@@ -6882,7 +6897,8 @@ ${tag}` : tag;
               conversationId: event.logout?.loggedOut ? null : event.conversationId || activeConversationId,
               model: event.model,
               logout: event.logout || null,
-              connectorResult: event.connectorResult || null
+              connectorResult: event.connectorResult || null,
+              ui: event.ui || null
             };
             if (onDone) onDone(result);
           } else if (event.type === "error") {

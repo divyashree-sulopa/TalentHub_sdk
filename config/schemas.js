@@ -110,6 +110,8 @@ export const ChatRequestSchema = z.object({
   history: z.array(ChatMessageSchema).max(100, 'History exceeds 100 items limit').nullable().optional().default([]),
   stream: z.boolean().optional().default(false),
   connectorAuth: z.record(z.string()).optional().default({}),
+  // What this widget can show (e.g. 'entry-form'); unknown values are ignored.
+  clientFeatures: z.array(z.string().max(40)).max(10).optional().default([]),
   parameters: z.object({
     temperature: z.number().min(0).max(2).optional(),
     maxTokens: z.number().min(1).max(8192).optional()

@@ -3412,7 +3412,8 @@ async function resolveHirePoolPreModelTurn({
   session,
   activeRegistry,
   authUser,
-  signal
+  signal,
+  clientFeatures = []
 }) {
   if (assistantId !== 'hirepool') {
     return { handled: false, followup: null };
@@ -3744,13 +3745,16 @@ async function resolveHirePoolPreModelTurn({
       readProfile,
       readCurrentProfile: readProfile,
       stageProfileUpdate,
-      cancelConfirmation: confirmationToken => cancelDynamicApiConfirmation(confirmationToken, authUser)
+      cancelConfirmation: confirmationToken => cancelDynamicApiConfirmation(confirmationToken, authUser),
+      // The dashboard widget can show the education / work-experience form.
+      canOpenEntryForm: Array.isArray(clientFeatures) && clientFeatures.includes('entry-form')
     });
     if (profileEdit?.handled) {
       return {
         handled: true,
         text: profileEdit.text,
-        action: profileEdit.hostAction || undefined
+        action: profileEdit.hostAction || undefined,
+        ui: profileEdit.ui || undefined
       };
     }
   }
@@ -3887,7 +3891,8 @@ chatRouter.post('/', async (req, res, next) => {
       session,
       activeRegistry,
       authUser,
-      signal: abortController.signal
+      signal: abortController.signal,
+      clientFeatures: validated.clientFeatures
     });
     if (preModel.handled) {
       recordGuestResponse(session, message, { text: preModel.text }, earlyTurn.addMessageOptions);
@@ -3895,6 +3900,7 @@ chatRouter.post('/', async (req, res, next) => {
         conversationId: session.id,
         text: preModel.text,
         ...(preModel.action ? { action: preModel.action } : {}),
+        ...(preModel.ui ? { ui: preModel.ui } : {}),
         model: null,
         finishReason: 'stop',
         timestamp: new Date().toISOString()
@@ -4080,7 +4086,8 @@ chatRouter.post('/stream', async (req, res, next) => {
       session,
       activeRegistry,
       authUser,
-      signal: abortController.signal
+      signal: abortController.signal,
+      clientFeatures: validated.clientFeatures
     });
     if (preModel.handled) {
       recordGuestResponse(session, message, { text: preModel.text }, earlyTurn.addMessageOptions);
@@ -4094,6 +4101,7 @@ chatRouter.post('/stream', async (req, res, next) => {
           conversationId: session.id,
           text: preModel.text,
           ...(preModel.action ? { action: preModel.action } : {}),
+          ...(preModel.ui ? { ui: preModel.ui } : {}),
           model: null
         })}\n\n`);
         res.end();
