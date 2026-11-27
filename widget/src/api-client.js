@@ -98,8 +98,6 @@ export class AssistantApiClient {
    * @returns {Promise<string|null>}
    */
   async _getOrFetchDemoToken() {
-    if (this.getAuthHeaders) return null;
-
     // Return cached token if still valid (with 60-second buffer)
     if (this._demoToken && Date.now() < this._demoTokenExpiresAt - 60000) {
       return this._demoToken;
@@ -107,6 +105,12 @@ export class AssistantApiClient {
 
     if (this._tokenFetchPromise) {
       return this._tokenFetchPromise;
+    }
+
+    // The server refused a guest pass recently (e.g. on a dashboard or an unlisted site):
+    // don't ask again on every request.
+    if (this._demoTokenRetryAt && Date.now() < this._demoTokenRetryAt) {
+      return null;
     }
 
     this._tokenFetchPromise = (async () => {
@@ -123,6 +127,7 @@ export class AssistantApiClient {
           if (data?.token) {
             this._demoToken = data.token;
             this._demoTokenExpiresAt = Date.now() + ((data.expiresIn || 3600) * 1000);
+            this._demoTokenRetryAt = 0;
             return this._demoToken;
           }
         }
@@ -131,34 +136,46 @@ export class AssistantApiClient {
       } finally {
         this._tokenFetchPromise = null;
       }
+      this._demoTokenRetryAt = Date.now() + 30000;
       return null;
     })();
 
     return this._tokenFetchPromise;
   }
 
-  async _headers(json = false) {
+  /**
+   * Request headers plus whether the website guest pass was used.
+   * Order: signed-in session, then the host's own pass, then the guest pass.
+   */
+  async _buildHeaders(json = false, { allowGuestPass = true } = {}) {
     let headers = {};
     if (this._authenticatedSession?.credential) {
       headers = { Authorization: `Bearer ${this._authenticatedSession.credential}` };
     } else if (this.getAuthHeaders) {
-      headers = (await this.getAuthHeaders()) || {};
-      if (!headers.Authorization && this._authenticatedSession?.credential) {
-        headers.Authorization = `Bearer ${this._authenticatedSession.credential}`;
-      }
-    } else {
+      headers = { ...((await this.getAuthHeaders()) || {}) };
+    }
+    let usedGuestPass = false;
+    // Nobody is signed in and the host gave no pass (e.g. a visitor on the
+    // HirePool website): use the website guest pass.
+    if (allowGuestPass && !headers.Authorization && !headers.authorization) {
       const token = await this._getOrFetchDemoToken();
       if (token) {
-        headers = { Authorization: `Bearer ${token}` };
+        headers = { ...headers, Authorization: `Bearer ${token}` };
+        usedGuestPass = true;
       }
     }
-    return json ? { ...headers, 'Content-Type': 'application/json' } : headers;
+    return { headers: json ? { ...headers, 'Content-Type': 'application/json' } : headers, usedGuestPass };
+  }
+
+  async _headers(json = false, options = {}) {
+    return (await this._buildHeaders(json, options)).headers;
   }
 
   async _hirePoolResumeRequest(path, { method, body, json = false } = {}) {
     const response = await fetch(`${this.baseUrl}/api/hirepool/resume/${path}`, {
       method,
-      headers: await this._headers(json),
+      // Account-only: signed-in candidates send their own pass; a guest pass never applies.
+      headers: await this._headers(json, { allowGuestPass: false }),
       body,
       credentials: this.credentials,
       cache: 'no-store'
@@ -257,13 +274,25 @@ export class AssistantApiClient {
     }
 
     try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: await this._headers(true),
-        body: JSON.stringify(payload),
-        credentials: this.credentials,
-        signal
-      });
+      const send = async () => {
+        const { headers, usedGuestPass } = await this._buildHeaders(true);
+        const res = await fetch(url, {
+          method: 'POST',
+          headers,
+          body: JSON.stringify(payload),
+          credentials: this.credentials,
+          signal
+        });
+        return { res, usedGuestPass };
+      };
+      let { res: response, usedGuestPass } = await send();
+      // An expired or rejected guest pass: get a fresh one and try once more.
+      if (response.status === 401 && usedGuestPass) {
+        try { await response.body?.cancel?.(); } catch {}
+        this.clearDemoToken();
+        this._demoTokenRetryAt = 0;
+        ({ res: response } = await send());
+      }
 
       if (!response.ok) {
         let errMsg = `Server returned HTTP ${response.status}`;
