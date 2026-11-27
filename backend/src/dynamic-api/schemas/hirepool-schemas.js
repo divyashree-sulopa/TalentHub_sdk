@@ -76,7 +76,8 @@ export function normalizeSalary(rawSalary, defaultCurrency = 'INR', defaultPayPe
 
   const str = String(rawSalary).trim();
   // Match "3-5 LPA" or "3 to 5 LPA" or "3-5 Lakhs"
-  const lpaMatch = str.match(/(\d+(?:\.\d+)?)\s*(?:-|to)\s*(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|lacs?)/i);
+  // (also "₹3.5–5 LPA", "3.5 LPA - 5 LPA", en/em dashes)
+  const lpaMatch = str.match(/(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|lacs?)?\s*(?:-|–|—|to)\s*(?:₹|rs\.?|inr)?\s*(\d+(?:\.\d+)?)\s*(?:lpa|lakhs?|lacs?)/i);
   if (lpaMatch) {
     const minLacs = Number.parseFloat(lpaMatch[1]);
     const maxLacs = Number.parseFloat(lpaMatch[2]);
@@ -98,6 +99,21 @@ export function normalizeSalary(rawSalary, defaultCurrency = 'INR', defaultPayPe
       salary_currency: 'INR',
       pay_period: 'year'
     };
+  }
+
+  // Plain amounts: "₹40,000 - ₹60,000 per month", "800000 to 1200000"
+  const amountMatch = str.match(/(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)\s*(?:-|–|—|to)\s*(?:₹|rs\.?|inr)?\s*(\d[\d,]*(?:\.\d+)?)/i);
+  if (amountMatch) {
+    const min = Number.parseFloat(amountMatch[1].replace(/,/g, ''));
+    const max = Number.parseFloat(amountMatch[2].replace(/,/g, ''));
+    if (min >= 1000 && max >= 1000) {
+      return {
+        salary_min: Math.round(min),
+        salary_max: Math.round(max),
+        salary_currency: 'INR',
+        pay_period: /\b(?:per\s+month|monthly|\/\s*month|pm)\b/i.test(str) ? 'month' : 'year'
+      };
+    }
   }
 
   return null;

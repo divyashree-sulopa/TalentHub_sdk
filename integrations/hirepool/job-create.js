@@ -36,9 +36,125 @@ export function isHirePoolJobCreateIntent(message) {
  * Extracts structured job fields from user natural language input.
  * Supports colons, equals, hyphens/dashes (-), and natural connective phrases.
  */
+const JOB_FIELD_LABELS = [
+  ['title', 'job\\s+title|title|job\\s+role|role|position'],
+  ['description', 'job\\s+description|description|jd'],
+  ['work_type', 'work\\s*type|work\\s*mode|remote\\s*type'],
+  ['employment_type', 'employment\\s*type|job\\s*type'],
+  ['location', 'job\\s+locations?|locations?|city'],
+  ['experience', 'experience\\s+level|experience|seniority'],
+  ['salary', 'salary\\s+range|salary|pay\\s+range|compensation|ctc|budget'],
+  ['skills', 'required\\s+skills?|key\\s+skills?|skills?|tech\\s+stack|technologies'],
+  ['openings', 'number\\s+of\\s+openings|openings?|vacancies'],
+  ['department', 'department'],
+  ['deadline', 'application\\s+deadline|deadline']
+];
+const JOB_LABEL_PATTERN = new RegExp(
+  `(?:^|[\\s,;|•*-])(${JOB_FIELD_LABELS.map(([, alt]) => alt).join('|')})\\s*[:=]`,
+  'gi'
+);
+
+/** The example text from our own prompt (or a template), not a real job description. */
+export function isPlaceholderJobDescription(text) {
+  const value = String(text || '').trim();
+  return /\bdescribe\s+the\s+role\b|\bat\s+least\s+30\s+characters\b|\bresponsibilities\s+and\s+qualifications\s+for\s+this\s+role\b/i.test(value) ||
+    /^(?:lorem\s+ipsum|tbd|tba|n\/?a|todo|to\s+be\s+(?:decided|added|updated)|description)\b[.!]?$/i.test(value);
+}
+
+/** "JavaScript, React.js, REST APIs, and Git." -> ["JavaScript", "React.js", "REST APIs", "Git"] */
+function splitSkills(value) {
+  // "…, and Git" / "React and Redux" (a plain list); "CI/CD" and "Sales and Marketing" stay whole
+  // unless the list itself has no commas and reads "A and B".
+  const text = String(value || '').replace(/,\s*(?:and|&)\s+/gi, ', ');
+  const list = /[,;|•]/.test(text) ? text : text.replace(/\s+(?:and|&)\s+/gi, ', ');
+  return list
+    .split(/\s*[,;|•]\s*/)
+    .map(s => s.trim().replace(/^(?:and|&)\s+/i, '').replace(/^[:"'-]+|["'-]+$|[.,;!?]+$/g, '').trim())
+    .filter(s => s && s.length <= 60);
+}
+
+/**
+ * "Job Title: X Job Description: Y Work Type: Z ..." (labels on one line or many):
+ * each value runs until the next label. Returns null when fewer than two labels are used.
+ */
+function readLabeledJobFields(text) {
+  const found = [...String(text || '').matchAll(JOB_LABEL_PATTERN)].map(match => {
+    const labelText = match[1];
+    const key = JOB_FIELD_LABELS.find(([, alt]) => new RegExp(`^(?:${alt})$`, 'i').test(labelText))?.[0];
+    const start = match.index + match[0].indexOf(labelText);
+    return { key, start, end: match.index + match[0].length };
+  }).filter(item => item.key);
+  if (found.length < 2) return null;
+  const values = {};
+  found.forEach((item, i) => {
+    const next = found[i + 1];
+    const value = text.slice(item.end, next ? next.start : undefined).replace(/^[\s:=-]+|[\s,;|•*-]+$/g, '').trim();
+    if (value && !values[item.key]) values[item.key] = value;
+  });
+  return values;
+}
+
 export function extractJobFields(raw, existing = {}) {
   const text = String(raw || '').trim();
   const data = { ...existing };
+
+  const labeled = readLabeledJobFields(text);
+  if (labeled) {
+    const clean = value => value.replace(/^[:"'-]+|["'-]+$/g, '').replace(/[.,;!?]+$/g, '').trim();
+    if (labeled.title) data.title = clean(labeled.title);
+    if (labeled.description) {
+      const description = labeled.description.replace(/^[:"'-]+|["'-]+$/g, '').trim();
+      if (isPlaceholderJobDescription(description)) {
+        data.description_placeholder = true;
+        delete data.description;
+      } else {
+        data.description = description;
+        delete data.description_placeholder;
+      }
+    }
+    const workType = labeled.work_type?.match(/\b(remote|hybrid|on[-\s]?site|office|in[-\s]?office|wfh|work\s+from\s+home)\b/i)?.[1];
+    if (workType) {
+      const val = workType.toLowerCase().replace(/[-_\s]/g, '');
+      data.remote_type = ['office', 'inoffice', 'onsite'].includes(val) ? 'onsite' : (['wfh', 'workfromhome'].includes(val) ? 'remote' : val);
+      data.work_type = data.remote_type;
+    }
+    const employment = labeled.employment_type?.match(/\b(permanent|contract(?:ual)?|full[-_\s]*time)\b/i)?.[1];
+    if (employment) {
+      const val = employment.toLowerCase().replace(/[-_\s]/g, '');
+      data.employment_type = (val === 'fulltime' || val === 'permanent') ? 'permanent' : 'contract';
+      data.job_type = data.employment_type === 'permanent' ? 'full_time' : 'contract';
+    }
+    if (labeled.location) {
+      // "Bengaluru, Karnataka" is one place; "Bengaluru / Pune" or "Bengaluru and Pune" are two.
+      const places = clean(labeled.location).split(/\s*(?:[;/|]|\band\b|&)\s*/i).map(clean).filter(Boolean);
+      const usable = places.filter(p => !/^(?:remote|hybrid|on[-\s]?site|not\s+specified|n\/?a)$/i.test(p));
+      if (usable.length) {
+        data.locations = usable.slice(0, 10);
+        data.location = usable[0];
+      }
+    }
+    const experience = labeled.experience?.match(/\b(entry|junior|fresher|mid|intermediate|senior|lead|executive)\b/i)?.[1]?.toLowerCase();
+    if (experience) {
+      data.experience_level = ['entry', 'junior', 'fresher'].includes(experience) ? 'entry'
+        : (['mid', 'intermediate'].includes(experience) ? 'mid' : (experience.startsWith('exec') ? 'executive' : experience));
+    }
+    const years = labeled.experience?.match(/(\d+)\s*(?:[-–—]|to)\s*(\d+)\s*(?:\+?\s*)?(?:years?|yrs?)/i);
+    if (years) {
+      data.experience_min = Number.parseInt(years[1], 10);
+      data.experience_max = Number.parseInt(years[2], 10);
+    }
+    if (labeled.salary) data.salary = clean(labeled.salary);
+    if (labeled.skills) {
+      const skills = splitSkills(labeled.skills);
+      if (skills.length) data.required_skills = skills;
+    }
+    const openings = labeled.openings?.match(/\d+/)?.[0];
+    if (openings) data.number_of_openings = Number.parseInt(openings, 10);
+    if (labeled.department) data.department = clean(labeled.department);
+    const deadline = labeled.deadline?.match(/\d{4}-\d{2}-\d{2}/)?.[0];
+    if (deadline) data.application_deadline = deadline;
+    return data;
+  }
   const sep = '(?:[:=]|\\s*[-–—]\\s+|\\s+(?:is|to|as)\\s+)';
 
   // 1. Job Title
@@ -57,8 +173,11 @@ export function extractJobFields(raw, existing = {}) {
   const descMatch = text.match(new RegExp(`\\bdescription\\s*${sep}\\s*(.+?)(?=\\s*(?:\\n|\\b(?:locations?|work\\s*type|employment\\s*type|experience|salary|skills?|openings?|deadline)\\s*(?:[:=]|[-–—])|$))`, 'is'));
   if (descMatch?.[1]) {
     const cleaned = descMatch[1].trim().replace(/^[:"'-]+|["'-]+$|[.,;!?]+$/g, '').trim();
-    if (cleaned.length >= 20) {
+    if (isPlaceholderJobDescription(cleaned)) {
+      data.description_placeholder = true;
+    } else if (cleaned.length >= 20) {
       data.description = cleaned;
+      delete data.description_placeholder;
     }
   } else if (!data.description && text.length >= 30 && !titleMatch && !/^\s*(?:location|work|salary|skills?|openings?)\s*[:=]/i.test(text)) {
     // If user typed a substantive paragraph after being prompted for description
@@ -107,7 +226,7 @@ export function extractJobFields(raw, existing = {}) {
   }
 
   // 7. Salary
-  const salMatch = text.match(new RegExp(`\\b(?:salary(?:\\s+range)?|pay(?:\\s+range)?|compensation|ctc)\\s*${sep}?\\s*([^,;\\n]+?)(?=\\s*(?:[.;]|\\n|\\b(?:required\\s*skills?|skills?|openings?)\\b|$))`, 'i')) ||
+  const salMatch = text.match(new RegExp(`\\b(?:salary(?:\\s+range)?|pay(?:\\s+range)?|compensation|ctc)\\s*${sep}?\\s*([^,;\\n]+?)(?=\\s*(?:\\.(?!\\d)|;|\\n|\\b(?:required\\s*skills?|skills?|openings?)\\b|$))`, 'i')) ||
     text.match(/\b(\d+(?:\.\d+)?\s*(?:[-–—]\s*\d+(?:\.\d+)?)?\s*(?:lpa|lakhs?|lacs?)(?:\s+inr)?)\b/i);
   if (salMatch?.[1]) {
     data.salary = salMatch[1].trim().replace(/^[:"'-]+|["'-]+$|[.,;!?]+$/g, '').trim();
@@ -116,7 +235,7 @@ export function extractJobFields(raw, existing = {}) {
   // 8. Required Skills
   const skillsMatch = text.match(new RegExp(`\\b(?:required\\s+skills?|skills?|technologies|tech\\s+stack)\\s*${sep}\\s*([^;\\n]+)`, 'i'));
   if (skillsMatch?.[1]) {
-    const rawSkills = skillsMatch[1].split(/[,;]/).map(s => s.trim().replace(/^[:"'-]+|["'-]+$|[.,;!?]+$/g, '')).filter(Boolean);
+    const rawSkills = splitSkills(skillsMatch[1]);
     if (rawSkills.length > 0) {
       data.required_skills = rawSkills;
     }
@@ -322,7 +441,9 @@ export async function handleHirePoolJobCreateTurn({
   // Check genuinely required missing fields
   const missingRequired = [];
   if (!mergedJobData.title) missingRequired.push('**Job Title** (e.g. Full Stack Developer)');
-  if (!mergedJobData.description || mergedJobData.description.length < 30) {
+  if (mergedJobData.description_placeholder && !mergedJobData.description) {
+    missingRequired.push('**Job Description**: what you sent is the example text. Please write what this person will do and what they need (a few lines is enough).');
+  } else if (!mergedJobData.description || mergedJobData.description.length < 30) {
     missingRequired.push('**Job Description** (at least 30 characters describing the responsibilities and qualifications for this role)');
   }
 
